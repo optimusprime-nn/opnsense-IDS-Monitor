@@ -1,0 +1,5 @@
+db_path = "demo.db"
+[opnsense]
+url = "https://192.0.2.1"
+[gui]
+autostart_monitor = false

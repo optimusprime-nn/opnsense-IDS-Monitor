@@ -1,0 +1,66 @@
+[package]
+name = "ipswatch"
+version = "0.2.0"
+edition = "2021"
+description = "Capture OPNsense IPS (Suricata) alerts and flag potential unwanted access"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# Desktop app (no console window).
+[[bin]]
+name = "IPSWatch"
+path = "src/bin/gui/main.rs"
+
+# Headless / scripting / service use.
+[[bin]]
+name = "ipswatch-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui_extras = "0.31"
+ipnet = "2"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls", "builder"] }
+log = "0.4"
+native-tls = "0.2"
+open = "5"
+rfd = "0.15"
+rusqlite = { version = "0.33", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1_smol = "1"
+toml = "0.8"
+ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+tauri-winrt-notification = "0.7"
+tray-icon = "0.20"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
+winreg = "0.55"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

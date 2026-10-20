@@ -1,19 +1,17 @@
-# Build a standalone Windows executable: dist\IPSWatch.exe
-# Requires: Python 3.11+ with Tkinter, and PyInstaller (pip install pyinstaller)
+# Build release executables into dist\ :
+#   dist\IPSWatch.exe      desktop app (tray, settings, toasts)
+#   dist\ipswatch-cli.exe  command line / service
+# Requires the Rust toolchain (https://rustup.rs) with the MSVC target.
 # Native tools write progress to stderr; check $LASTEXITCODE instead of using "Stop".
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot
 
-python -m unittest discover -s tests
+cargo test --release
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 
-python deploy\make_icon.py deploy\ipswatch.ico
-if ($LASTEXITCODE -ne 0) { throw "icon generation failed" }
+cargo build --release
+if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed `
-    --name IPSWatch `
-    --icon deploy\ipswatch.ico `
-    IPSWatch.pyw
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
-
-Write-Host "Built $(Resolve-Path dist\IPSWatch.exe)"
+New-Item -ItemType Directory -Force dist | Out-Null
+Copy-Item target\release\IPSWatch.exe, target\release\ipswatch-cli.exe dist\ -Force
+Get-ChildItem dist\*.exe | ForEach-Object { "{0,-18} {1,6:N1} MB" -f $_.Name, ($_.Length / 1MB) }

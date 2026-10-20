@@ -1,3 +1,4 @@
+# Linux service for the command-line build (cargo build --release --bin ipswatch-cli).
 [Unit]
 Description=ipswatch - OPNsense IPS monitor
 After=network-online.target
@@ -7,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=ipswatch
 WorkingDirectory=/opt/ipswatch
-ExecStart=/usr/bin/python3 -m ipswatch -c /opt/ipswatch/config.toml run
+ExecStart=/opt/ipswatch/ipswatch-cli -c /opt/ipswatch/config.toml run
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true

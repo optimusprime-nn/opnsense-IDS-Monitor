@@ -1,13 +1,19 @@
-# ipswatch — OPNsense IPS capture & unwanted-access flagging
+# IPS Watch — OPNsense IPS capture & unwanted-access flagging
 
-Collects Suricata IPS alerts from OPNsense, stores them in SQLite, correlates them with the
-firewall log, and raises **findings** when something looks like real unwanted access rather than
-background internet noise. Findings go to the console, Slack/Discord/webhook, ntfy, or email, and
-can optionally auto-block the attacker through a firewall alias.
+A Windows desktop app (plus a command-line build) written in Rust. It collects Suricata IPS
+alerts from OPNsense, stores them in SQLite, correlates them with the firewall log, and raises
+**findings** when something looks like real unwanted access rather than background noise.
 
-Pure Python 3.11+ standard library — no packages to install. Comes as a Windows desktop app
-(`IPSWatch.exe`) and as a CLI/service. Runs on any box that can reach the
-firewall (Linux VM, Raspberry Pi, Windows PC).
+- **System tray**: runs in the background, the tray icon turns red while high/critical findings are open,
+  and the right-click menu has Open, Start/Stop monitoring, Poll now, Start with Windows and Quit.
+- **Start with Windows**: per-user Run entry (no admin rights), launches hidden in the tray.
+- **Settings editor**: every option is editable in the app (Settings tab or the **Settings** menu), with
+  validation, Revert, per-section Restore defaults, and test buttons.
+- **Alerts**: Windows toast notifications, and optionally Slack/Discord/webhook, ntfy and email.
+- **Response**: acknowledge / false positive, block or unblock an IP through a firewall alias, and optional auto-block.
+- **Secrets**: the API key, API secret and SMTP password are encrypted with Windows DPAPI.
+
+![Findings](docs/findings.png)
 
 ```
  OPNsense ──(REST API poll: ids/service/query_alerts, firewall log)──┐
@@ -15,127 +21,107 @@ firewall (Linux VM, Raspberry Pi, Windows PC).
                                                                      ▼
                            normalize → SQLite → detection rules → findings
                                                        │              │
-                                        firewall-log correlation      ├─ notify (webhook / ntfy / email)
-                                                                      └─ auto-block via alias (opt-in)
+                                        firewall-log correlation      ├─ toast / webhook / ntfy / email
+                                                                      └─ block via alias (manual or auto)
 ```
+
+## Install / build
+
+Download or build `IPSWatch.exe` and run it. It is a single portable file with no installer and no runtime.
+
+```powershell
+.\build.ps1          # runs the tests, builds dist\IPSWatch.exe and dist\ipswatch-cli.exe
+```
+
+Building needs the Rust toolchain (`rustup`, MSVC target). Settings, the database and the log live in
+`%APPDATA%\ipswatch\`.
+
+## First run
+
+1. The app opens on **Settings → Firewall connection**. Enter the firewall URL and API key/secret, then click
+   **Test firewall connection** and **Save settings**. Monitoring starts automatically.
+2. **Settings → Application**: tick **Start with Windows** (or use the tray menu or the **Settings** menu).
+   Closing the window hides it to the tray; use **Quit** in the tray menu or the File menu to exit.
+3. To try it without a firewall, use **File → Import eve.json...** with `samples/eve-sample.json`.
+
+| Settings page | What's there |
+|---|---|
+| Firewall connection | URL, API key/secret, TLS verify / CA file, timeout, poll interval, paging, firewall-log correlation |
+| Collection | Realtime syslog receiver: on/off, address, port, UDP/TCP |
+| Detection | Internal networks, window, score threshold, brute-force/sweep/port-scan thresholds, sensitive ports, ignored SIDs, trusted sources, re-notify interval |
+| Signature rules | Compromise categories and signature keywords |
+| Notifications | Webhook (Slack/Discord/generic), ntfy, SMTP; minimum severity; test button |
+| Auto-block | Enable, dry run, alias, minimum severity, never-block list |
+| Application | Start with Windows, start minimized, close to tray, auto-start monitoring, desktop alerts and their minimum severity |
+| Data & storage | Database file, event retention, delete old events, delete all data, open data folder |
+
+![Settings](docs/settings.png)
 
 ## What gets flagged
 
-Events are grouped per actor inside a sliding window (default 15 min) and scored. A finding is
-raised at score ≥ 50; severity: medium ≥ 50, high ≥ 80, critical ≥ 120.
+Events are grouped per actor inside a sliding window (default 15 min) and scored. A finding is raised
+at score ≥ 50; severity is medium ≥ 50, high ≥ 80, critical ≥ 120.
 
 **Inbound findings (external source → your network)**
 
 | Signal | Points |
 |---|---|
-| Suricata severity 1 / 2 / 3 | 40 / 20 / 5 |
-| Alert was **not dropped** by the IPS (traffic reached the internal host) | 30 |
+| Highest Suricata severity 1 / 2 / 3 | 40 / 20 / 5 |
+| An alert was **not dropped** by the IPS (traffic reached the host) | 30 |
 | Targeted a sensitive port (SSH, RDP, SMB, DBs, WinRM, VNC…) | 20 |
 | Exploit / malware / privilege-gain signature | 30 |
-| ≥ 20 alerts in the window (brute force / flood) | 25 |
-| ≥ 10 distinct internal hosts (sweep) or ≥ 15 distinct ports (port scan) | 25 each |
-| **Firewall log shows PASSED connections from the same source to internal hosts** | 40 |
+| ≥ 20 alerts in the window (brute force) | 25 |
+| ≥ 10 distinct hosts (sweep) / ≥ 15 distinct ports (port scan) | 25 each |
+| **Firewall log shows PASSED connections from the source to internal hosts** | 40 |
 
-Titled *"Potential unwanted access from X"* if the traffic got through (not dropped, or the firewall
-passed it), otherwise *"Blocked attack activity from X"*.
+Titled *"Potential unwanted access from X"* if traffic got through, otherwise *"Blocked attack activity from X"*.
 
-**Compromise findings (internal host is the *source*)**
+**Compromise findings (an internal host is the source)**: a trojan/C2/exploit indicator (60),
+internal→internal severity ≤ 2 (lateral movement, 30), outbound malicious traffic not dropped (20),
+plus the severity/repeat/scan points. These usually matter most: something is already inside.
 
-| Signal | Points |
-|---|---|
-| Trojan / C2 / exploit / privilege-gain / info-leak indicator from an internal host | 60 |
-| Internal → internal alert of severity ≤ 2 (lateral movement) | 30 |
-| Outbound malicious traffic not dropped | 20 |
-| Plus the severity / repeat / scan points above | |
+## OPNsense setup
 
-These are usually the most important alerts: they suggest something is already inside.
+**Intrusion detection** (*Services → Intrusion Detection → Administration*)
+1. Enable it, turn on **IPS mode**, and choose the interfaces: WAN, plus LAN if you want internal, lateral and outbound visibility.
+2. Download rule sets (e.g. ET open / abuse.ch). Under *Policy*, set the categories you want blocked to **Drop**.
+   In IPS mode only *drop* rules block traffic; IPS Watch treats any alert that wasn't dropped as "reached the host".
+3. Optional realtime feed: enable **eve syslog output** (advanced mode), then *System → Settings → Logging → Remote*
+   with application `suricata` → this PC, port 5514. Allow that port in Windows Firewall.
 
-Thresholds, sensitive ports, compromise categories/keywords, ignored SIDs and trusted sources
-are all configurable in `config.toml`.
+**API user** (*System → Access → Users*): create a dedicated user and give it only the Intrusion Detection
+and firewall-log privileges, plus *Firewall: Alias* if you'll block IPs. Then create an API key for it.
 
-## 1. Configure OPNsense
+**Blocking**: create a *Host(s)* alias `ipswatch_block` and a WAN **Block** rule at the top with that alias
+as the source. Leave auto-block in dry run until you trust the findings. Internal, private and reserved
+addresses, and anything on the never-block list, are never blocked.
 
-**Intrusion detection** — *Services → Intrusion Detection → Administration*
-1. *Settings*: Enabled ✔, **IPS mode** ✔ (to actually drop), Promiscuous mode if you use VLANs,
-   Interfaces: WAN (add LAN too if you want to catch internal/lateral/outbound activity).
-2. Turn on advanced mode and enable **Enable eve syslog output** (needed only for the realtime syslog feed).
-3. *Download*: enable rule sets (e.g. ET open / abuse.ch), download & update.
-4. *Policy*: add a policy that sets action **Drop** for the categories you want blocked. In IPS
-   mode only rules with action *drop* block traffic; *alert* rules just log. ipswatch treats any
-   alert that wasn't dropped as "traffic reached the host".
+## Command line
 
-**API user** — *System → Access → Users*
-1. Create a dedicated user (e.g. `ipswatch`), no shell, no GUI login needed.
-2. Grant only the privileges it needs: Intrusion Detection (alert log), the firewall log viewer
-   (for correlation), and *Firewall: Alias* edit rights only if you enable auto-block.
-3. Create an **API key** for that user; the key/secret file downloads once.
+`ipswatch-cli` uses the same engine and, by default, the same settings file as the desktop app.
 
-**Optional realtime feed** — *System → Settings → Logging → Remote*
-- Add a destination: transport UDP(4) or TCP(4), host = the ipswatch machine, port `5514`,
-  applications: `suricata`, level `info`. Set `[syslog] enabled = true` in the config.
-- The API poller still runs and fills any gaps (dedupe is automatic).
-
-**Optional auto-block**
-1. *Firewall → Aliases*: create alias `ipswatch_block`, type *Host(s)*, empty.
-2. *Firewall → Rules → WAN*: add a **Block** rule at the top, source = `ipswatch_block`.
-3. In the config set `[block] enabled = true`, leave `dry_run = true` for a week, read the logs,
-   then switch it off. Private/reserved IPs and `never_block` entries are never blocked.
-
-## 2a. Windows desktop app
-
-![IPS Watch findings view](samples/gui-screenshot.png)
-
-Run `dist\IPSWatch.exe` (build it with `.\build.ps1`) or, from source, double-click `IPSWatch.pyw`.
-
-1. **Settings** tab: enter the firewall URL, API key and secret, then click *Test firewall connection* and *Save settings*.
-2. Click **Start monitoring**. New findings at or above the configured severity show a pop-up in the
-   bottom-right corner with a sound; click the pop-up to jump to the finding.
-3. **Findings** tab: severity counters, a colour-coded list, and a "why it was flagged" panel for the selected finding.
-   You can *Acknowledge*, mark it a *False positive*, *Reopen*, *Block IP...* / *Unblock IP...* (adds the IP to or
-   removes it from the block alias, after a confirmation), or *Show events*. Right-click an IP to copy it or look it up on AbuseIPDB.
-4. **IPS events** tab: the raw alerts, searchable by IP, signature or SID. Red rows weren't dropped by the IPS.
-5. **Activity log**: polling, errors, notifications and blocks.
-
-Settings and the database live in `%APPDATA%\ipswatch\`. The API key, API secret and SMTP password are encrypted with Windows
-DPAPI, so only your Windows account can read them. If you use the syslog feed, allow the port (default UDP 5514) in Windows
-Firewall. To start the app at login, put a shortcut to `IPSWatch.exe` in `shell:startup` and tick
-*Start monitoring when the app opens*.
-
-The CLI and GUI share the same engine. To point the CLI at the GUI's settings, use
-`python -m ipswatch -c "%APPDATA%\ipswatch\config.toml" findings`.
-
-## 2b. Command line / service
-
-```bash
-cp config.example.toml config.toml        # fill in url / api_key / api_secret / notify
-python -m ipswatch -c config.toml check   # verify API access
-python -m ipswatch -c config.toml run     # continuous monitoring
+```powershell
+ipswatch-cli check                          # verify API access
+ipswatch-cli run                            # monitor in the foreground
+ipswatch-cli poll                           # one pass (Task Scheduler / cron)
+ipswatch-cli import samples\eve-sample.json --quiet
+ipswatch-cli findings --min high
+ipswatch-cli ack inbound:203.0.113.7        # also: fp, reopen
+ipswatch-cli report report.html
+ipswatch-cli -c path\to\config.toml ...     # use another settings file
 ```
 
-Other commands:
+`deploy/ipswatch.service` runs the CLI as a Linux service.
 
-```bash
-python -m ipswatch -c config.toml poll                 # single pass (cron / Task Scheduler)
-python -m ipswatch -c config.toml findings --min high  # list open findings
-python -m ipswatch -c config.toml ack  inbound:203.0.113.7
-python -m ipswatch -c config.toml fp   compromise:192.168.1.50   # mark false positive (stays silent)
-python -m ipswatch -c config.toml report report.html   # static HTML report
-python -m ipswatch -c config.toml import eve.json --quiet       # offline analysis of an exported eve.json
+## Development
+
+```powershell
+cargo test                                               # unit + detection/pipeline tests
+cargo test --test windows_integration -- --ignored       # toggles the real Run key, shows a toast
+cargo run --bin IPSWatch -- --config samples\demo\config.toml --tab settings:application
 ```
 
-As a Linux service: copy the folder to `/opt/ipswatch`, create user `ipswatch`, install
-`deploy/ipswatch.service` to `/etc/systemd/system/`, then `systemctl enable --now ipswatch`.
-On Windows use Task Scheduler with `python -m ipswatch -c C:\path\config.toml run` at startup.
+The `--tab findings|events|log|settings[:section]` option opens a specific page. `--minimized` starts in the tray.
 
-## Tuning
-
-- First week: set `notify.min_severity = "high"`, review `findings --min medium` daily, add noisy
-  SIDs to `ignore_sids`, add trusted scanners (vuln scanners, monitoring) to `ignore_sources`.
-- Use `fp <key>` to silence a specific actor permanently; it reopens itself only if you `reopen` it.
-- Set `internal_networks` to your real LAN/VLAN/VPN ranges — direction detection depends on it.
-
-## Tests
-
-```bash
-python -m unittest discover -s tests -v
-```
+History: the first commit is the original Python/Tkinter version. The SQLite schema, the settings file
+(including DPAPI-encrypted secrets) and the scoring are compatible with it.
