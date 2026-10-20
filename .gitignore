@@ -13,3 +13,7 @@ __pycache__/
 *.db-shm
 config.toml
 !samples/**/config.toml
+
+# App logs
+*.log
+*.log.1
