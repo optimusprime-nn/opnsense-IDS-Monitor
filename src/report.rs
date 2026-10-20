@@ -56,7 +56,7 @@ pub fn write_html(store: &Store, out: &Path) -> Result<usize> {
         })
         .collect();
     let doc = format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark">
 <title>IPS Watch Report</title><style>
 body{{font:14px/1.5 system-ui,sans-serif;max-width:960px;margin:0 auto;padding:16px;background:#f8f9fb;color:#1d2939}}
 h1{{font-size:20px}} .m{{color:#667085;font-size:12px}} code{{font-size:12px;word-break:break-all}}
@@ -64,6 +64,8 @@ h1{{font-size:20px}} .m{{color:#667085;font-size:12px}} code{{font-size:12px;wor
 .n{{font-size:24px;font-weight:700}} .f{{background:#fff;border:1px solid #e4e7ec;border-radius:8px;margin:8px 0;padding:10px 14px}}
 summary{{cursor:pointer}} .sev{{color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;text-transform:uppercase;margin-right:6px}}
 h4{{margin:10px 0 2px;font-size:13px}} ul{{margin:0;padding-left:20px}}
+@media (prefers-color-scheme: dark){{body{{background:#14161a;color:#e6e8eb}}
+.t,.f{{background:#1d2025;border-color:#2e333b}} .m{{color:#98a2b3}}}}
 </style></head><body><h1>OPNsense IPS Watch</h1><div class="m">Generated {gen} · open findings by severity</div>
 <div class="tiles">{tiles}</div>{cards}</body></html>"#,
         gen = chrono::Local::now().format("%Y-%m-%d %H:%M"),

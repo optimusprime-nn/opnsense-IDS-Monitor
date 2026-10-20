@@ -105,6 +105,7 @@ min_severity = "critical"
 never_block = []
 
 [gui]
+theme = "dark"
 autostart_monitor = true
 desktop_alerts = true
 alert_min_severity = "high"

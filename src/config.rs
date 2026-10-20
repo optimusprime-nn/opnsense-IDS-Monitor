@@ -260,9 +260,32 @@ impl Default for BlockCfg {
     }
 }
 
+/// Window colour scheme.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follow the Windows app colour setting.
+    System,
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 3] = [Theme::Dark, Theme::Light, Theme::System];
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::System => "Follow Windows",
+            Theme::Dark => "Dark",
+            Theme::Light => "Light",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct GuiCfg {
+    pub theme: Theme,
     pub autostart_monitor: bool,
     pub desktop_alerts: bool,
     pub alert_min_severity: Severity,
@@ -278,6 +301,7 @@ pub struct GuiCfg {
 impl Default for GuiCfg {
     fn default() -> Self {
         Self {
+            theme: Theme::Dark,
             autostart_monitor: true,
             desktop_alerts: true,
             alert_min_severity: Severity::High,

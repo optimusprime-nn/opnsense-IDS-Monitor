@@ -1,7 +1,7 @@
 //! Settings editor: every config option, grouped into sections, edited as a draft.
 
 use eframe::egui::{self, ComboBox, DragValue, RichText, TextEdit, Ui};
-use ipswatch::config::{Config, Severity};
+use ipswatch::config::{Config, Severity, Theme};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -379,6 +379,13 @@ impl SettingsForm {
     fn application(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let g = &mut self.draft.gui;
         grid(ui, "app", |ui| {
+            row(ui, "Theme", "Previews immediately; Save to keep it", |ui| {
+                ComboBox::from_id_salt("theme").selected_text(g.theme.label()).show_ui(ui, |ui| {
+                    for t in Theme::ALL {
+                        ui.selectable_value(&mut g.theme, t, t.label());
+                    }
+                });
+            });
             row(ui, "Start with Windows", "Launches hidden in the tray when you sign in", |ui| {
                 ui.checkbox(&mut g.start_with_windows, "");
             });

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
-use ipswatch::config::{self, Severity};
+use ipswatch::config::{self, Severity, Theme};
 use ipswatch::normalize::Event;
 use ipswatch::opnsense::OPNsense;
 use ipswatch::store::Finding;
@@ -97,15 +97,29 @@ pub struct App {
     about: bool,
     log_follow: bool,
     tray_hint_shown: bool,
+    /// Effective dark/light last pushed to the native title bar.
+    titlebar_dark: Option<bool>,
+}
+
+fn theme_pref(t: Theme) -> egui::ThemePreference {
+    match t {
+        Theme::System => egui::ThemePreference::System,
+        Theme::Dark => egui::ThemePreference::Dark,
+        Theme::Light => egui::ThemePreference::Light,
+    }
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, ctl: Arc<Controller>, cfg_error: Option<String>) -> Self {
         let cfg = ctl.cfg();
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(10.0, 4.0);
-        cc.egui_ctx.set_style(style);
+        cc.egui_ctx.set_theme(theme_pref(cfg.gui.theme));
+        // Same spacing for both themes.
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            cc.egui_ctx.style_mut_of(theme, |style| {
+                style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+                style.spacing.button_padding = egui::vec2(10.0, 4.0);
+            });
+        }
 
         let tray = match Tray::new(ctl.clone()) {
             Ok(t) => Some(t),
@@ -140,6 +154,7 @@ impl App {
             about: false,
             log_follow: true,
             tray_hint_shown: ctl.shared.store.get_kv("tray_hint_shown").ok().flatten().is_some(),
+            titlebar_dark: None,
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -393,6 +408,20 @@ impl App {
         }
     }
 
+    /// Switch theme now and save it (other unsaved settings edits stay in the draft).
+    fn set_theme(&mut self, t: Theme) {
+        self.ctl.ctx.set_theme(theme_pref(t));
+        let mut cfg = self.ctl.cfg();
+        cfg.gui.theme = t;
+        match config::save(&cfg, &self.ctl.cfg_path) {
+            Ok(()) => {
+                self.settings.draft.gui.theme = t;
+                *self.ctl.shared.cfg.write().unwrap_or_else(|e| e.into_inner()) = cfg;
+            }
+            Err(e) => self.message("Theme", format!("Could not save: {e:#}"), true),
+        }
+    }
+
     fn save_settings(&mut self) {
         let new = match self.settings.to_config() {
             Ok(c) => c,
@@ -412,6 +441,7 @@ impl App {
             }
         }
         *self.ctl.shared.cfg.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
+        self.ctl.ctx.set_theme(theme_pref(new.gui.theme));
         self.settings.load(&new);
         self.settings.error = None;
         log::info!("Settings saved");
@@ -483,6 +513,21 @@ impl App {
                         self.tab = t;
                     }
                 }
+                ui.separator();
+                ui.menu_button("Theme", |ui| {
+                    let current = self.ctl.cfg().gui.theme;
+                    for t in Theme::ALL {
+                        if ui.radio(current == t, t.label()).clicked() {
+                            ui.close_menu();
+                            self.set_theme(t);
+                        }
+                    }
+                });
+                if ui.button("Toggle dark / light").clicked() {
+                    ui.close_menu();
+                    let next = if ui.ctx().theme() == egui::Theme::Dark { Theme::Light } else { Theme::Dark };
+                    self.set_theme(next);
+                }
             });
             ui.menu_button("Settings", |ui| {
                 for s in settings::Section::ALL {
@@ -505,6 +550,13 @@ impl App {
                         }
                         Err(e) => self.message("Start with Windows", format!("{e:#}"), true),
                     }
+                }
+                let mut dark = cfg.gui.theme == Theme::Dark
+                    || (cfg.gui.theme == Theme::System && ui.ctx().theme() == egui::Theme::Dark);
+                if ui.checkbox(&mut dark, "Dark mode").changed() {
+                    cfg.gui.theme = if dark { Theme::Dark } else { Theme::Light };
+                    ui.ctx().set_theme(theme_pref(cfg.gui.theme));
+                    changed = true;
                 }
                 changed |= ui.checkbox(&mut cfg.gui.start_minimized, "Start minimized to tray").changed();
                 changed |= ui.checkbox(&mut cfg.gui.close_to_tray, "Close button hides to tray").changed();
@@ -878,6 +930,17 @@ impl eframe::App for App {
             } else {
                 self.ctl.stop();
             }
+        }
+
+        // The Settings page previews its draft theme; everywhere else uses the saved one.
+        let want = if self.tab == Tab::Settings { self.settings.draft.gui.theme } else { self.ctl.cfg().gui.theme };
+        if ctx.options(|o| o.theme_preference) != theme_pref(want) {
+            ctx.set_theme(theme_pref(want));
+        }
+        let dark = ctx.theme() == egui::Theme::Dark;
+        if self.titlebar_dark != Some(dark) {
+            crate::win::set_dark_titlebar(self.ctl.hwnd.load(Ordering::Relaxed), dark);
+            self.titlebar_dark = Some(dark);
         }
 
         while let Ok(m) = self.bg_rx.try_recv() {

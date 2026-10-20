@@ -1,4 +1,4 @@
-# IPS Watch — OPNsense IPS capture & unwanted-access flagging
+# IPS Watch â€” OPNsense IPS capture & unwanted-access flagging
 
 A Windows desktop app (plus a command-line build) written in Rust. It collects Suricata IPS
 alerts from OPNsense, stores them in SQLite, correlates them with the firewall log, and raises
@@ -11,18 +11,19 @@ alerts from OPNsense, stores them in SQLite, correlates them with the firewall l
   validation, Revert, per-section Restore defaults, and test buttons.
 - **Alerts**: Windows toast notifications, and optionally Slack/Discord/webhook, ntfy and email.
 - **Response**: acknowledge / false positive, block or unblock an IP through a firewall alias, and optional auto-block.
+- **Dark mode**: dark by default, with Light and Follow Windows options (View → Theme, the Settings menu, or Settings → Application). The title bar changes too, and exported HTML reports follow the viewer's dark/light preference.
 - **Secrets**: the API key, API secret and SMTP password are encrypted with Windows DPAPI.
 
 ![Findings](docs/findings.png)
 
 ```
- OPNsense ──(REST API poll: ids/service/query_alerts, firewall log)──┐
-          ──(remote syslog: Suricata EVE JSON, optional realtime)────┤
-                                                                     ▼
-                           normalize → SQLite → detection rules → findings
-                                                       │              │
-                                        firewall-log correlation      ├─ toast / webhook / ntfy / email
-                                                                      └─ block via alias (manual or auto)
+ OPNsense â”€â”€(REST API poll: ids/service/query_alerts, firewall log)â”€â”€â”
+          â”€â”€(remote syslog: Suricata EVE JSON, optional realtime)â”€â”€â”€â”€â”¤
+                                                                     â–¼
+                           normalize â†’ SQLite â†’ detection rules â†’ findings
+                                                       â”‚              â”‚
+                                        firewall-log correlation      â”œâ”€ toast / webhook / ntfy / email
+                                                                      â””â”€ block via alias (manual or auto)
 ```
 
 ## Install / build
@@ -38,11 +39,11 @@ Building needs the Rust toolchain (`rustup`, MSVC target). Settings, the databas
 
 ## First run
 
-1. The app opens on **Settings → Firewall connection**. Enter the firewall URL and API key/secret, then click
+1. The app opens on **Settings â†’ Firewall connection**. Enter the firewall URL and API key/secret, then click
    **Test firewall connection** and **Save settings**. Monitoring starts automatically.
-2. **Settings → Application**: tick **Start with Windows** (or use the tray menu or the **Settings** menu).
+2. **Settings â†’ Application**: tick **Start with Windows** (or use the tray menu or the **Settings** menu).
    Closing the window hides it to the tray; use **Quit** in the tray menu or the File menu to exit.
-3. To try it without a firewall, use **File → Import eve.json...** with `samples/eve-sample.json`.
+3. To try it without a firewall, use **File â†’ Import eve.json...** with `samples/eve-sample.json`.
 
 | Settings page | What's there |
 |---|---|
@@ -52,7 +53,7 @@ Building needs the Rust toolchain (`rustup`, MSVC target). Settings, the databas
 | Signature rules | Compromise categories and signature keywords |
 | Notifications | Webhook (Slack/Discord/generic), ntfy, SMTP; minimum severity; test button |
 | Auto-block | Enable, dry run, alias, minimum severity, never-block list |
-| Application | Start with Windows, start minimized, close to tray, auto-start monitoring, desktop alerts and their minimum severity |
+| Application | Theme (dark / light / follow Windows), start with Windows, start minimized, close to tray, auto-start monitoring, desktop alerts and their minimum severity |
 | Data & storage | Database file, event retention, delete old events, delete all data, open data folder |
 
 ![Settings](docs/settings.png)
@@ -60,36 +61,36 @@ Building needs the Rust toolchain (`rustup`, MSVC target). Settings, the databas
 ## What gets flagged
 
 Events are grouped per actor inside a sliding window (default 15 min) and scored. A finding is raised
-at score ≥ 50; severity is medium ≥ 50, high ≥ 80, critical ≥ 120.
+at score â‰¥ 50; severity is medium â‰¥ 50, high â‰¥ 80, critical â‰¥ 120.
 
-**Inbound findings (external source → your network)**
+**Inbound findings (external source â†’ your network)**
 
 | Signal | Points |
 |---|---|
 | Highest Suricata severity 1 / 2 / 3 | 40 / 20 / 5 |
 | An alert was **not dropped** by the IPS (traffic reached the host) | 30 |
-| Targeted a sensitive port (SSH, RDP, SMB, DBs, WinRM, VNC…) | 20 |
+| Targeted a sensitive port (SSH, RDP, SMB, DBs, WinRM, VNCâ€¦) | 20 |
 | Exploit / malware / privilege-gain signature | 30 |
-| ≥ 20 alerts in the window (brute force) | 25 |
-| ≥ 10 distinct hosts (sweep) / ≥ 15 distinct ports (port scan) | 25 each |
+| â‰¥ 20 alerts in the window (brute force) | 25 |
+| â‰¥ 10 distinct hosts (sweep) / â‰¥ 15 distinct ports (port scan) | 25 each |
 | **Firewall log shows PASSED connections from the source to internal hosts** | 40 |
 
 Titled *"Potential unwanted access from X"* if traffic got through, otherwise *"Blocked attack activity from X"*.
 
 **Compromise findings (an internal host is the source)**: a trojan/C2/exploit indicator (60),
-internal→internal severity ≤ 2 (lateral movement, 30), outbound malicious traffic not dropped (20),
+internalâ†’internal severity â‰¤ 2 (lateral movement, 30), outbound malicious traffic not dropped (20),
 plus the severity/repeat/scan points. These usually matter most: something is already inside.
 
 ## OPNsense setup
 
-**Intrusion detection** (*Services → Intrusion Detection → Administration*)
+**Intrusion detection** (*Services â†’ Intrusion Detection â†’ Administration*)
 1. Enable it, turn on **IPS mode**, and choose the interfaces: WAN, plus LAN if you want internal, lateral and outbound visibility.
 2. Download rule sets (e.g. ET open / abuse.ch). Under *Policy*, set the categories you want blocked to **Drop**.
    In IPS mode only *drop* rules block traffic; IPS Watch treats any alert that wasn't dropped as "reached the host".
-3. Optional realtime feed: enable **eve syslog output** (advanced mode), then *System → Settings → Logging → Remote*
-   with application `suricata` → this PC, port 5514. Allow that port in Windows Firewall.
+3. Optional realtime feed: enable **eve syslog output** (advanced mode), then *System â†’ Settings â†’ Logging â†’ Remote*
+   with application `suricata` â†’ this PC, port 5514. Allow that port in Windows Firewall.
 
-**API user** (*System → Access → Users*): create a dedicated user and give it only the Intrusion Detection
+**API user** (*System â†’ Access â†’ Users*): create a dedicated user and give it only the Intrusion Detection
 and firewall-log privileges, plus *Firewall: Alias* if you'll block IPs. Then create an API key for it.
 
 **Blocking**: create a *Host(s)* alias `ipswatch_block` and a WAN **Block** rule at the top with that alias

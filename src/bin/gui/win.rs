@@ -42,6 +42,19 @@ mod imp {
         }
     }
 
+    /// Dark or light native title bar (Windows 10 20H1+ / 11). Harmless on older builds.
+    pub fn set_dark_titlebar(hwnd: isize, dark: bool) {
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+        if hwnd == 0 {
+            return;
+        }
+        let v: i32 = dark as i32;
+        // SAFETY: passes a 4-byte BOOL for a window owned by this process.
+        unsafe {
+            DwmSetWindowAttribute(hwnd as _, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, &v as *const i32 as _, 4);
+        }
+    }
+
     pub fn error_box(title: &str, text: &str) {
         let (t, x) = (wide(title), wide(text));
         unsafe { MessageBoxW(std::ptr::null_mut(), x.as_ptr(), t.as_ptr(), MB_OK | MB_ICONERROR) };
@@ -80,6 +93,8 @@ pub fn find_window(_: &str) -> isize {
 pub fn claim_single_instance() -> bool {
     true
 }
+#[cfg(not(windows))]
+pub fn set_dark_titlebar(_: isize, _: bool) {}
 #[cfg(not(windows))]
 pub fn error_box(_: &str, text: &str) {
     eprintln!("{text}");
