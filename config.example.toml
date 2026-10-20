@@ -1,0 +1,57 @@
+# ipswatch configuration. Copy to config.toml and edit.
+db_path = "ipswatch.db"
+poll_seconds = 60
+
+[opnsense]
+url = "https://192.168.1.1"          # firewall web UI address
+api_key = ""                          # System > Access > Users > (user) > API keys
+api_secret = ""
+verify_tls = true                     # set false only for a self-signed cert you can't add a CA for
+ca_file = ""                          # path to the firewall's CA cert (preferred over verify_tls=false)
+page_size = 500
+max_pages = 20
+
+[syslog]
+# Real-time feed: OPNsense remote logging of Suricata EVE JSON (see README).
+enabled = false
+bind = "0.0.0.0"
+port = 5514
+protocol = "udp"                      # udp | tcp
+
+[detect]
+internal_networks = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fd00::/8"]
+# sensitive_ports = [22, 23, 445, 3389, ...]     # defaults are sensible; override if needed
+window_minutes = 15
+repeat_threshold = 20
+scan_hosts_threshold = 10
+scan_ports_threshold = 15
+flag_score = 50                       # findings below this score are discarded
+ignore_sids = []                      # noisy signatures you have reviewed, e.g. [2210054]
+ignore_sources = []                   # trusted scanners, e.g. ["198.51.100.10/32"]
+renotify_minutes = 360
+
+[firewall]
+correlate = true                      # check firewall log for PASSED traffic from flagged sources
+log_limit = 2000
+
+[notify]
+min_severity = "medium"               # low | medium | high | critical
+webhook_url = ""                      # Slack / Discord / Mattermost incoming webhook
+webhook_format = "slack"              # slack | discord | generic
+ntfy_url = ""                         # e.g. "https://ntfy.sh/your-private-topic"
+smtp_host = ""
+smtp_port = 587
+smtp_starttls = true
+smtp_user = ""
+smtp_password = ""
+smtp_from = ""
+smtp_to = []
+
+[block]
+# Auto-block adds the attacker IP to a firewall alias. You must create the alias
+# (type Host(s)) and a WAN block rule that uses it. Start with dry_run = true.
+enabled = false
+dry_run = true
+alias = "ipswatch_block"
+min_severity = "critical"
+never_block = []                      # e.g. your office / VPN egress IPs

@@ -1,0 +1,15 @@
+# Rust
+/target/
+
+# Python / PyInstaller (legacy)
+__pycache__/
+/build/
+/dist/
+*.spec
+
+# Local data - never commit databases or real configs (may contain secrets)
+*.db
+*.db-wal
+*.db-shm
+config.toml
+!samples/**/config.toml

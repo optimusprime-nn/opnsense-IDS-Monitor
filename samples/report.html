@@ -1,0 +1,50 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>IPS Watch Report</title>
+<style>
+body{font:14px/1.5 system-ui,sans-serif;max-width:960px;margin:0 auto;padding:16px;background:#f8f9fb;color:#1d2939}
+h1{font-size:20px} .m{color:#667085;font-size:12px} code{font-size:12px;word-break:break-all}
+.tiles{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0 20px} .t{background:#fff;border:1px solid #e4e7ec;border-radius:8px;padding:10px 16px;min-width:90px}
+.n{font-size:24px;font-weight:700} .f{background:#fff;border:1px solid #e4e7ec;border-radius:8px;margin:8px 0;padding:10px 14px}
+summary{cursor:pointer} .sev{color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;text-transform:uppercase;margin-right:6px}
+h4{margin:10px 0 2px;font-size:13px} ul{margin:0;padding-left:20px}
+</style></head><body>
+<h1>OPNsense IPS Watch</h1><div class="m">Generated 2026-10-20 05:06 UTC · open findings by severity</div>
+<div class="tiles"><div class="t"><div class="n" style="color:#b42318">2</div>critical</div><div class="t"><div class="n" style="color:#c4320a">0</div>high</div><div class="t"><div class="n" style="color:#b54708">1</div>medium</div><div class="t"><div class="n" style="color:#475467">0</div>low</div></div>
+
+<details class="f" open>
+  <summary><span class="sev" style="background:#b42318">critical</span>
+    <b>Internal host 192.168.1.50 shows signs of compromise</b> <span class="m">score 150 · 2 events · open
+    · last 2026-10-19 12:03:30 UTC</span></summary>
+  <div class="body">
+    <p class="m">key <code>compromise:192.168.1.50</code> · first seen 2026-10-19 12:03:20 UTC
+    </p>
+    <h4>Why</h4><ul><li>internal host triggered compromise indicator: ET EXPLOIT Possible ETERNALBLUE SMB exploit; ET MALWARE Cobalt Strike Beacon Observed</li><li>highest IPS severity 1 from internal host</li><li>possible lateral movement (internal -&gt; internal)</li><li>outbound malicious traffic was NOT dropped</li></ul>
+    <h4>Targets</h4><p><code>185.100.87.1:443, 192.168.1.5:445</code></p>
+    <h4>Signatures</h4><ul><li>[2027082] ET MALWARE Cobalt Strike Beacon Observed (x1)</li><li>[2024218] ET EXPLOIT Possible ETERNALBLUE SMB exploit (x1)</li></ul>
+  </div>
+</details>
+<details class="f" open>
+  <summary><span class="sev" style="background:#b42318">critical</span>
+    <b>Potential unwanted access from 198.51.100.44</b> <span class="m">score 125 · 30 events · open
+    · last 2026-10-19 12:02:09 UTC</span></summary>
+  <div class="body">
+    <p class="m">key <code>inbound:198.51.100.44</code> · first seen 2026-10-19 12:01:40 UTC
+    </p>
+    <h4>Why</h4><ul><li>alert was NOT dropped by IPS - traffic reached internal host</li><li>exploit/malware signature: ET SCAN Possible RDP brute force</li><li>30 alerts in 15 min (brute force / flood)</li><li>highest IPS severity 2</li><li>targeted sensitive service port(s) 3389</li></ul>
+    <h4>Targets</h4><p><code>192.168.1.20:3389</code></p>
+    <h4>Signatures</h4><ul><li>[2023753] ET SCAN Possible RDP brute force (x30)</li></ul>
+  </div>
+</details>
+<details class="f" >
+  <summary><span class="sev" style="background:#b54708">medium</span>
+    <b>Blocked attack activity from 203.0.113.9</b> <span class="m">score 75 · 40 events · open
+    · last 2026-10-19 12:00:39 UTC</span></summary>
+  <div class="body">
+    <p class="m">key <code>inbound:203.0.113.9</code> · first seen 2026-10-19 12:00:00 UTC
+    </p>
+    <h4>Why</h4><ul><li>40 alerts in 15 min (brute force / flood)</li><li>touched 40 distinct ports (port scan)</li><li>targeted sensitive service port(s) 22, 23</li><li>highest IPS severity 3</li></ul>
+    <h4>Targets</h4><p><code>192.168.1.10:20, 192.168.1.10:21, 192.168.1.10:22, 192.168.1.10:23, 192.168.1.10:24, 192.168.1.10:25, 192.168.1.10:26, 192.168.1.10:27, 192.168.1.10:28, 192.168.1.10:29, 192.168.1.10:30, 192.168.1.10:31, 192.168.1.10:32, 192.168.1.10:33, 192.168.1.10:34, 192.168.1.10:35, 192.168.1.10:36, 192.168.1.10:37, 192.168.1.10:38, 192.168.1.10:39, 192.168.1.10:40, 192.168.1.10:41, 192.168.1.10:42, 192.168.1.10:43, 192.168.1.10:44, 192.168.1.10:45, 192.168.1.10:46, 192.168.1.10:47, 192.168.1.10:48, 192.168.1.10:49, 192.168.1.10:50, 192.168.1.10:51, 192.168.1.10:52, 192.168.1.10:53, 192.168.1.10:54, 192.168.1.10:55, 192.168.1.10:56, 192.168.1.10:57, 192.168.1.10:58, 192.168.1.10:59</code></p>
+    <h4>Signatures</h4><ul><li>[2009582] ET SCAN Nmap SYN scan (x40)</li></ul>
+  </div>
+</details>
+</body></html>
