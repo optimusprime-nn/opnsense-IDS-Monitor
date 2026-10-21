@@ -26,6 +26,11 @@ struct Cli {
 enum Cmd {
     /// Verify API access and IDS status
     Check,
+    /// Explain the firewall's HTTPS certificate (Let's Encrypt? need a CA file?)
+    CheckCert {
+        /// URL to check (default: the configured firewall URL)
+        url: Option<String>,
+    },
     /// Monitor continuously (Ctrl+C to stop)
     Run,
     /// One poll + detection pass (for Task Scheduler / cron)
@@ -89,6 +94,14 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Check => println!("{}", api()?.check(cfg.firewall.correlate, cfg.block.enabled.then_some(cfg.block.alias.as_str()))?),
+        Cmd::CheckCert { url } => {
+            let url = url.unwrap_or_else(|| cfg.opnsense.url.clone());
+            let r = ipswatch::tlscheck::check(&url, &cfg.opnsense.ca_file)?;
+            println!("[{:?}] {url}\n{}", r.verdict, r.summary);
+            if let Some(s) = r.suggested_url {
+                println!("\nSuggested Firewall URL: {s}");
+            }
+        }
         Cmd::Poll => {
             let a = if cfg.opnsense.url.is_empty() { None } else { Some(api()?) };
             let added = match &a {

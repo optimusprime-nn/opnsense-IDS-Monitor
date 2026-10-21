@@ -13,6 +13,7 @@ pub mod notify;
 pub mod opnsense;
 pub mod report;
 pub mod store;
+pub mod tlscheck;
 pub mod toast;
 pub mod winsecret;
 

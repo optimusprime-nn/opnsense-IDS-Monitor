@@ -38,6 +38,7 @@ serde_json = "1"
 sha1_smol = "1"
 toml = "0.8"
 ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
+x509-parser = "0.16"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"

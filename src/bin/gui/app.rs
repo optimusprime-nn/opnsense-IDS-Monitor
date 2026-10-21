@@ -55,6 +55,8 @@ impl StatusFilter {
 /// Results of background jobs, delivered to the UI thread.
 enum Bg {
     Message { title: String, text: String, error: bool },
+    /// Certificate check result, optionally offering a better Firewall URL.
+    Cert { text: String, error: bool, suggest_url: Option<String> },
     Reload,
 }
 
@@ -94,6 +96,8 @@ pub struct App {
     bg_tx: Sender<Bg>,
     bg_rx: Receiver<Bg>,
     message: Option<(String, String, bool)>,
+    /// Shown as a "Use ... as Firewall URL" button in the message window.
+    suggest_url: Option<String>,
     about: bool,
     log_follow: bool,
     tray_hint_shown: bool,
@@ -151,6 +155,7 @@ impl App {
             bg_tx,
             bg_rx,
             message: cfg_error.map(|e| ("Settings could not be read".to_string(), format!("{e}\n\nDefaults are in use until you save."), true)),
+            suggest_url: None,
             about: false,
             log_follow: true,
             tray_hint_shown: ctl.shared.store.get_kv("tray_hint_shown").ok().flatten().is_some(),
@@ -351,6 +356,22 @@ impl App {
                         }
                     }),
                 },
+                settings::Action::CheckCertificate => {
+                    let url = self.settings.draft.opnsense.url.trim().to_string();
+                    let ca = self.settings.draft.opnsense.ca_file.clone();
+                    if url.is_empty() {
+                        self.message("Check certificate", "Enter the Firewall URL first.", true);
+                    } else {
+                        self.spawn(move || match ipswatch::tlscheck::check(&url, &ca) {
+                            Ok(r) => Bg::Cert {
+                                error: !matches!(r.verdict, ipswatch::tlscheck::Verdict::Trusted | ipswatch::tlscheck::Verdict::TrustedViaCaFile),
+                                text: r.summary,
+                                suggest_url: r.suggested_url,
+                            },
+                            Err(e) => Bg::Cert { text: format!("{e:#}"), error: true, suggest_url: None },
+                        });
+                    }
+                }
                 settings::Action::TestNotify => match self.settings.to_config() {
                     Err(e) => self.message("Test notification", e, true),
                     Ok(cfg) => self.spawn(move || {
@@ -946,6 +967,11 @@ impl eframe::App for App {
         while let Ok(m) = self.bg_rx.try_recv() {
             match m {
                 Bg::Message { title, text, error } => self.message = Some((title, text, error)),
+                Bg::Cert { text, error, suggest_url } => {
+                    let title = if error { "Certificate: action needed" } else { "Certificate OK" };
+                    self.message = Some((title.into(), text, error));
+                    self.suggest_url = suggest_url;
+                }
                 Bg::Reload => {}
             }
             self.reload();
@@ -1008,12 +1034,23 @@ impl eframe::App for App {
                     let t = RichText::new(&text);
                     ui.label(if error { t.color(ui.visuals().error_fg_color) } else { t });
                     ui.add_space(8.0);
-                    if ui.button("  OK  ").clicked() {
-                        close = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if let Some(u) = self.suggest_url.clone() {
+                            if ui.button(RichText::new(format!("Use {u} as Firewall URL")).strong()).clicked() {
+                                self.settings.draft.opnsense.url = u;
+                                self.settings.section = settings::Section::Firewall;
+                                self.tab = Tab::Settings;
+                                close = true;
+                            }
+                        }
+                        if ui.button("  OK  ").clicked() {
+                            close = true;
+                        }
+                    });
                 });
             if !open || close {
                 self.message = None;
+                self.suggest_url = None;
             }
         }
         if self.about {

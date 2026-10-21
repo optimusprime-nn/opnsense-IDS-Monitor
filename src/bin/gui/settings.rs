@@ -46,6 +46,7 @@ pub enum Action {
     Revert,
     Defaults(Section),
     TestConnection,
+    CheckCertificate,
     TestNotify,
     TestToast,
     PruneNow,
@@ -250,12 +251,15 @@ impl SettingsForm {
             row(ui, "Verify TLS certificate", "Turn off only for a self-signed cert you can't add a CA for", |ui| {
                 ui.checkbox(&mut d.opnsense.verify_tls, "");
             });
-            row(ui, "CA certificate file", "Optional: the firewall's CA (.crt/.pem)", |ui| {
-                text(ui, &mut d.opnsense.ca_file, 300.0);
+            row(ui, "CA certificate file", "Leave empty for Let's Encrypt. Not sure? Click Check certificate (help below)", |ui| {
+                text(ui, &mut d.opnsense.ca_file, 260.0);
                 if ui.button("Browse...").clicked() {
                     if let Some(p) = rfd::FileDialog::new().add_filter("Certificates", &["crt", "pem", "cer"]).pick_file() {
                         d.opnsense.ca_file = p.display().to_string();
                     }
+                }
+                if ui.button("Check certificate").clicked() {
+                    actions.push(Action::CheckCertificate);
                 }
             });
             row(ui, "Request timeout (s)", "", |ui| num(ui, &mut d.opnsense.timeout_seconds, 5..=300));
@@ -267,6 +271,31 @@ impl SettingsForm {
             });
             row(ui, "Firewall log rows", "Rows fetched per detection pass", |ui| num(ui, &mut d.firewall.log_limit, 100..=50000));
         });
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Do I need a CA certificate file? Where do I find it?")
+            .default_open(self.draft.opnsense.ca_file.trim().is_empty() && !self.draft.opnsense.url.trim().is_empty())
+            .show(ui, |ui| {
+                ui.set_max_width(760.0);
+                ui.label(RichText::new("Not sure? Click \"Check certificate\" - it looks at the firewall and tells you which case you're in.").strong());
+                ui.add_space(6.0);
+                ui.label(RichText::new("Let's Encrypt (or another public CA)").strong());
+                ui.label("Windows already trusts these. Leave the CA certificate file EMPTY and keep \"Verify TLS certificate\" ticked. \
+                          Use the host name the certificate was issued for (e.g. https://fw.example.com) as the Firewall URL, not the IP: \
+                          Let's Encrypt can't issue certificates for private IP addresses. That name must resolve to the firewall from this PC; \
+                          if it doesn't, add an override in OPNsense under Services > Unbound DNS > Overrides. \
+                          You can see if you use Let's Encrypt in OPNsense under Services > ACME Client > Certificates.");
+                ui.add_space(6.0);
+                ui.label(RichText::new("Self-signed / OPNsense's default certificate").strong());
+                ui.label("System > Settings > Administration > SSL Certificate shows which certificate the web GUI uses. \
+                          Download its CA from System > Trust > Authorities (download icon). For the default self-signed \
+                          \"Web GUI TLS certificate\" there is no CA: download the certificate itself from System > Trust > Certificates. \
+                          Download the certificate only - never the private key. Save it somewhere permanent and pick it with Browse.");
+                ui.add_space(6.0);
+                ui.label(RichText::new("Other options").strong());
+                ui.label("Install the certificate into Windows (double-click > Install Certificate > Current User > Trusted Root \
+                          Certification Authorities) and leave this field empty. Unticking \"Verify TLS certificate\" also works, \
+                          but then the connection (and your API key) isn't protected from interception - use it only to test.");
+            });
         ui.add_space(10.0);
         if ui.button("Test firewall connection").clicked() {
             actions.push(Action::TestConnection);
