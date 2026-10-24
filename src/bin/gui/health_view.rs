@@ -163,14 +163,20 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
                     let (txt, col) = if cs.running { ("running", good(dark)) } else { ("STOPPED", sev_color(Severity::Critical, dark)) };
                     ui.label(RichText::new(txt).strong().color(col));
                     ui.weak(format!(
-                        "· bouncer {} (last seen {}) · {} active bans ({} detected here, {} community) · {} alerts",
+                        "· bouncer {} (last seen {}) · {} IPs blocked in the firewall ({} detected here, {} from community / subscribed lists) · {} alerts",
                         if cs.bouncer_enabled { "on" } else { "OFF" },
                         if cs.bouncer_last_seen.is_empty() { "never".into() } else { ipswatch::local_time(&cs.bouncer_last_seen) },
-                        cs.active_bans,
+                        cs.firewall_blocked.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
                         cs.local_bans,
                         cs.community_bans,
                         cs.alerts_total
                     ));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if cs.firewall_blocked.is_some_and(|b| b <= cs.local_bans + 5) {
+                        ui.label(RichText::new("Community blocklist not loaded yet").color(ui.visuals().warn_fg_color));
+                        ui.weak("- accept the engine at app.crowdsec.net (Security Engines); the first download can take ~2 h.                                  See it on the firewall: Firewall > Diagnostics > Aliases > crowdsec_blocklists.");
+                    }
                 });
                 if !cs.top_scenarios.is_empty() {
                     ui.horizontal_wrapped(|ui| {

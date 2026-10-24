@@ -38,6 +38,8 @@ pub struct Status {
     pub active_bans: usize,
     pub local_bans: usize,
     pub community_bans: usize,
+    /// IPs actually loaded into the firewall's CrowdSec tables (local + community + subscribed lists).
+    pub firewall_blocked: Option<usize>,
     pub alerts_total: usize,
     pub top_scenarios: Vec<(String, usize)>,
     pub recent: Vec<CsAlert>,
@@ -130,6 +132,21 @@ pub fn check(cfg: &Config, store: &Store, api: &OPNsense, out: &mut Vec<Problem>
         );
     }
     store.set_kv("crowdsec_bans", &serde_json::to_string(&bans)?)?;
+
+    // The bouncer's firewall tables hold everything that is really blocked, including the
+    // community blocklist, which the plugin's decision list doesn't show.
+    let mut blocked = None;
+    for alias in ["crowdsec_blocklists", "crowdsec6_blocklists"] {
+        if let Ok(v) = api.get_raw(&format!("firewall/alias_util/list/{alias}")) {
+            let n = v.get("total").and_then(Value::as_u64).map(|n| n as usize)
+                .unwrap_or_else(|| v.get("rows").and_then(Value::as_array).map_or(0, |r| r.len()));
+            blocked = Some(blocked.unwrap_or(0) + n);
+        }
+    }
+    st.firewall_blocked = blocked;
+    if let Some(b) = blocked {
+        st.community_bans = st.community_bans.max(b.saturating_sub(st.local_bans));
+    }
 
     // Alerts: counts for the page, findings for serious scenarios not seen before.
     let alerts: Vec<CsAlert> = search(api, "alerts")

@@ -647,7 +647,7 @@ pub fn run(cfg: &Config, store: &Store, api: &OPNsense) -> Result<(Snapshot, Vec
 
 /// Upsert findings for current problems; resolve stateful health findings that cleared.
 /// `resolve_prefixes`: finding keys with these prefixes that no longer appear get resolved.
-fn sync(cfg: &Config, store: &Store, problems: &[Problem], resolve_prefixes: &[&str]) -> Result<Vec<Finding>> {
+pub(crate) fn sync(cfg: &Config, store: &Store, problems: &[Problem], resolve_prefixes: &[&str]) -> Result<Vec<Finding>> {
     let now = crate::now_iso();
     let mut alerted = Vec::new();
     for p in problems {

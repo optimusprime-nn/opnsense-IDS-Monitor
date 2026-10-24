@@ -43,6 +43,8 @@ pub struct Shared {
     pub data_version: AtomicU64,
     /// Latest firewall health snapshot (None until the first check).
     pub health: Mutex<Option<crate::health::Snapshot>>,
+    /// Latest DNS server snapshot (None until the first check).
+    pub dns: Mutex<Option<crate::dns::Snapshot>>,
     /// Called on the monitor thread for each finding that should alert (desktop toast, repaint...).
     pub on_alert: AlertHook,
     /// Called after every cycle (e.g. to request a GUI repaint).
@@ -58,6 +60,25 @@ impl Shared {
     }
     fn set_status(&self, f: impl FnOnce(&mut Status)) {
         f(&mut self.status.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+}
+
+/// Run the DNS checks once, store the snapshot and alert. Uses the latest exposure audit.
+pub fn run_dns(shared: &Shared, cfg: &Config) -> Option<String> {
+    let exposure = shared.health.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.exposure.clone()).unwrap_or_default();
+    match crate::dns::run(cfg, &shared.store, &exposure) {
+        Ok((snap, alerts)) => {
+            *shared.dns.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+            for f in &alerts {
+                (shared.on_alert)(shared, f);
+            }
+            shared.bump();
+            None
+        }
+        Err(e) => {
+            error!("DNS check failed: {e:#}");
+            Some(format!("{e:#}"))
+        }
     }
 }
 
@@ -90,7 +111,8 @@ impl Monitor {
                 } else {
                     None
                 };
-                if api.is_none() && syslog.is_none() {
+                let dns_on = cfg.dns.enabled && !cfg.dns.servers.is_empty();
+                if api.is_none() && syslog.is_none() && !dns_on {
                     error!("Nothing to collect from - set the firewall URL or enable the syslog receiver in Settings.");
                     shared.set_status(|s| s.running = false);
                     (shared.on_cycle)();
@@ -103,6 +125,7 @@ impl Monitor {
                 info!("Monitoring started (poll every {}s)", cfg.poll_seconds);
                 let mut last_prune = Instant::now() - Duration::from_secs(7200);
                 let mut last_health: Option<Instant> = None;
+                let mut last_dns: Option<Instant> = None;
                 let mut down_since: Option<chrono::DateTime<chrono::Utc>> = None;
                 loop {
                     let mut added = 0;
@@ -150,6 +173,11 @@ impl Monitor {
                                 Err(e) => error!("health check failed: {e:#}"),
                             }
                         }
+                    }
+                    // DNS servers (independent of the firewall API).
+                    if dns_on && last_dns.is_none_or(|t| t.elapsed() >= Duration::from_secs(cfg.dns.interval_minutes.max(1) as u64 * 60)) {
+                        last_dns = Some(Instant::now());
+                        run_dns(&shared, &cfg);
                     }
                     if added > 0 {
                         info!("{added} new IPS events");

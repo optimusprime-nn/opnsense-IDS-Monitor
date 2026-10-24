@@ -5,6 +5,7 @@ pub mod collect;
 pub mod config;
 pub mod crowdsec;
 pub mod detect;
+pub mod dns;
 pub mod engine;
 pub mod health;
 pub mod icon;

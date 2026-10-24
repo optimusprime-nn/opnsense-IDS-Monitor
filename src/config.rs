@@ -417,6 +417,73 @@ impl Default for IpsPolicyCfg {
     }
 }
 
+/// One Technitium DNS server.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct DnsServerCfg {
+    pub name: String,
+    /// Web console, e.g. http://192.168.1.99:5380
+    pub url: String,
+    /// API token (Administration > Sessions > Create Token); DPAPI-encrypted on disk.
+    pub token: String,
+}
+
+impl DnsServerCfg {
+    /// Address test queries go to: the console URL's host.
+    pub fn host(&self) -> String {
+        let u = self.url.trim();
+        let rest = u.split_once("://").map(|x| x.1).unwrap_or(u);
+        let hostport = rest.split('/').next().unwrap_or("");
+        if let Some(v6) = hostport.strip_prefix('[') {
+            return v6.split(']').next().unwrap_or("").to_string();
+        }
+        hostport.rsplit_once(':').map(|x| x.0).unwrap_or(hostport).to_string()
+    }
+    pub fn label(&self) -> String {
+        if self.name.trim().is_empty() { self.host() } else { self.name.trim().to_string() }
+    }
+}
+
+/// Technitium DNS server monitoring.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct DnsCfg {
+    pub enabled: bool,
+    pub servers: Vec<DnsServerCfg>,
+    pub interval_minutes: u32,
+    pub timeout_seconds: u64,
+    /// Names looked up on every check (should resolve; tests recursion / forwarders).
+    pub test_domains: Vec<String>,
+    /// Alert when this share of the last hour's queries failed upstream (SERVFAIL).
+    pub servfail_pct: f64,
+    /// Alert when blocklists haven't been refreshed for this long.
+    pub blocklist_max_age_hours: u32,
+    /// A client is unusual above this many queries per hour AND this many times its usual rate.
+    pub client_queries_per_hour: u64,
+    pub client_spike_factor: f64,
+    /// NXDOMAIN answers to one client in one check interval (needs a query-log app).
+    pub nxdomain_burst: u64,
+    pub change_alerts: bool,
+}
+
+impl Default for DnsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: vec![],
+            interval_minutes: 5,
+            timeout_seconds: 10,
+            test_domains: ["cloudflare.com", "opnsense.org"].map(String::from).to_vec(),
+            servfail_pct: 5.0,
+            blocklist_max_age_hours: 48,
+            client_queries_per_hour: 3000,
+            client_spike_factor: 5.0,
+            nxdomain_burst: 200,
+            change_alerts: true,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -432,6 +499,7 @@ pub struct Config {
     pub ips_policy: IpsPolicyCfg,
     pub health: HealthCfg,
     pub crowdsec: CrowdsecCfg,
+    pub dns: DnsCfg,
     pub gui: GuiCfg,
 }
 
@@ -450,6 +518,7 @@ impl Default for Config {
             ips_policy: Default::default(),
             health: Default::default(),
             crowdsec: Default::default(),
+            dns: Default::default(),
             gui: Default::default(),
         }
     }
@@ -476,6 +545,11 @@ impl Config {
         }
         if self.opnsense.page_size == 0 || self.opnsense.max_pages == 0 {
             bail!("Page size and max pages must be at least 1");
+        }
+        for d in &self.dns.servers {
+            if !(d.url.starts_with("http://") || d.url.starts_with("https://")) || d.host().is_empty() {
+                bail!("DNS server '{}': console URL must look like http://192.168.1.99:5380", d.label());
+            }
         }
         Ok(())
     }
@@ -524,8 +598,10 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn secrets_mut(cfg: &mut Config) -> [&mut String; 3] {
-    [&mut cfg.opnsense.api_key, &mut cfg.opnsense.api_secret, &mut cfg.notify.smtp_password]
+fn secrets_mut(cfg: &mut Config) -> Vec<&mut String> {
+    let mut v = vec![&mut cfg.opnsense.api_key, &mut cfg.opnsense.api_secret, &mut cfg.notify.smtp_password];
+    v.extend(cfg.dns.servers.iter_mut().map(|d| &mut d.token));
+    v
 }
 
 #[cfg(test)]
@@ -539,11 +615,14 @@ mod tests {
         let mut c = Config::default();
         c.opnsense.api_secret = "s3cr\"et".into();
         c.detect.ignore_sids = vec![1, 2];
+        c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.99:5380".into(), token: "t0kenvalue".into() });
         save(&c, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         #[cfg(windows)]
         assert!(text.contains("dpapi:"), "secret should be encrypted on disk");
         assert!(!text.contains("s3cr"));
+        #[cfg(windows)]
+        assert!(!text.contains("t0ken"));
         assert_eq!(load(&p).unwrap(), c);
     }
 
@@ -564,5 +643,13 @@ mod tests {
         assert!(c.validate().is_ok());
         c.detect.internal_networks.push("bogus".into());
         assert!(c.validate().unwrap_err().to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn dns_host() {
+        let d = |u: &str| DnsServerCfg { url: u.into(), ..Default::default() }.host();
+        assert_eq!(d("http://192.168.1.99:5380"), "192.168.1.99");
+        assert_eq!(d("https://ns1.example.com/"), "ns1.example.com");
+        assert_eq!(d("http://[fd00::1]:5380"), "fd00::1");
     }
 }

@@ -74,6 +74,20 @@ enum Cmd {
     },
     /// Run the firewall health, exposure, device and config checks once and print the result
     Health,
+    /// Check the Technitium DNS servers once and print the result
+    Dns {
+        /// Skip the firewall exposure audit (port forwards to the DNS servers)
+        #[arg(long)]
+        no_exposure: bool,
+    },
+    /// GET a Technitium API path from one DNS server and print the JSON (secrets hidden), e.g. dashboard/stats/get type=LastHour
+    DumpDns {
+        /// Server name or address as configured
+        server: String,
+        path: String,
+        /// Query parameters as key=value
+        params: Vec<String>,
+    },
     /// Recompute all findings from stored events with the current rules (keeps your ack/false-positive marks)
     Rescore,
     /// Print raw alert rows from the firewall API (diagnostics)
@@ -151,6 +165,7 @@ fn main() -> Result<()> {
                 status: Mutex::new(Status::default()),
                 data_version: AtomicU64::new(0),
                 health: Mutex::new(None),
+                dns: Mutex::new(None),
                 on_alert: Box::new(|_, _| {}),
                 on_cycle: Box::new(|| {}),
             });
@@ -208,10 +223,10 @@ fn main() -> Result<()> {
             }
             match &snap.crowdsec {
                 Some(cs) => {
-                    println!("\nCrowdSec: {} · bouncer last seen {} · {} active bans ({} local, {} community) · {} alerts",
+                    println!("\nCrowdSec: {} · bouncer last seen {} · {} IPs blocked in the firewall ({} local, {} community/lists) · {} alerts",
                         if cs.running { "running" } else { "STOPPED" },
                         if cs.bouncer_last_seen.is_empty() { "never".into() } else { ipswatch::local_time(&cs.bouncer_last_seen) },
-                        cs.active_bans, cs.local_bans, cs.community_bans, cs.alerts_total);
+                        cs.firewall_blocked.map(|b| b.to_string()).unwrap_or_else(|| "?".into()), cs.local_bans, cs.community_bans, cs.alerts_total);
                     for (sc, n) in &cs.top_scenarios {
                         println!("  {n:>4}  {sc}");
                     }
@@ -233,6 +248,60 @@ fn main() -> Result<()> {
             for f in mine {
                 println!("  {:<8} {}", f.severity.as_str().to_uppercase(), f.title);
             }
+        }
+        Cmd::Dns { no_exposure } => {
+            let exposure = if no_exposure || cfg.opnsense.url.is_empty() {
+                vec![]
+            } else {
+                ipswatch::health::run(&cfg, &store, &api()?)?.0.exposure
+            };
+            let (snap, _) = ipswatch::dns::run(&cfg, &store, &exposure)?;
+            for s in &snap.servers {
+                println!("{} ({}) - DNS {} - API {}", s.name, s.host, if s.dns_ok { "UP" } else { "DOWN" }, if s.api_ok { format!("OK, Technitium {}", s.version) } else { s.api_error.clone() });
+                for l in &s.lookups {
+                    println!("  lookup {:<20} {:<9} {} answers {:>4} ms", l.domain, l.result, l.answers, l.ms);
+                }
+                if let Some(st) = &s.stats {
+                    println!("  last hour: {} queries, {:.1}% blocked, {:.1}% SERVFAIL, {:.1}% NXDOMAIN, {} clients, {} blocklist domains",
+                        st.total, st.pct(st.blocked), st.pct(st.servfail), st.pct(st.nxdomain), st.clients, st.block_list_zones);
+                }
+                println!("  recursion {} · forwarders {} · blocking {} ({} lists, refreshed {} h ago, next {})",
+                    s.recursion, if s.forwarders.is_empty() { "none".into() } else { s.forwarders.join(", ") }, s.blocking, s.blocklist_urls,
+                    s.blocklist_age_hours.map(|a| format!("{a:.1}")).unwrap_or("?".into()), ipswatch::local_time(&s.blocklist_next_update));
+                for c in s.top_clients.iter().take(5) {
+                    println!("  client {:<16} {:<30} {:>6} queries (usual {})", c.ip, c.name, c.hits, c.usual.map(|u| format!("{u:.0}")).unwrap_or("learning".into()));
+                }
+                for (d, n) in s.top_blocked.iter().take(5) {
+                    println!("  blocked {d} x{n}");
+                }
+                println!("  query log app: {}", if s.query_logger.is_empty() { "none" } else { &s.query_logger });
+                for c in &s.nx_clients {
+                    println!("  nxdomain {:<16} {:>5} ({} distinct) e.g. {}", c.ip, c.count, c.unique, c.sample.join(", "));
+                }
+                println!("  zones: {}", s.zones.iter().map(|z| format!("{} [{}{}]", z.name, z.kind, if z.problem.is_empty() { String::new() } else { format!(", {}", z.problem) })).collect::<Vec<_>>().join(", "));
+                for e in &s.exposure {
+                    println!("  WAN {} {}/{} {} - used for: {} - listening: {:?} - {}", e.interface, e.port, e.protocol, if e.blocked { "blocked" } else { "OPEN" }, if e.purpose.is_empty() { "-" } else { &e.purpose }, e.listening, e.note);
+                }
+                for e in &s.errors {
+                    println!("  check failed: {e}");
+                }
+                println!();
+            }
+            let open = store.list_findings(Some("open"), Severity::Low, 200)?;
+            let mine: Vec<_> = open.iter().filter(|f| f.kind == "dns").collect();
+            println!("Open DNS findings: {}", mine.len());
+            for f in mine {
+                println!("  {:<8} {}", f.severity.as_str().to_uppercase(), f.title);
+                for r in &f.reasons {
+                    println!("             - {r}");
+                }
+            }
+        }
+        Cmd::DumpDns { server, path, params } => {
+            let srv = cfg.dns.servers.iter().find(|s| s.label() == server || s.host() == server).context("no such DNS server in the config")?;
+            let q: Vec<(&str, &str)> = params.iter().filter_map(|p| p.split_once('=')).collect();
+            let v = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?.get(&path, &q)?;
+            println!("{}", serde_json::to_string_pretty(&ipswatch::dns::sanitize(&v))?)
         }
         Cmd::Rescore => {
             if !cfg.opnsense.url.is_empty() {

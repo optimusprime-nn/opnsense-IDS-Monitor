@@ -21,6 +21,7 @@ use crate::Controller;
 enum Tab {
     Findings,
     Health,
+    Dns,
     Events,
     Log,
     Settings,
@@ -44,10 +45,11 @@ enum KindFilter {
     Device,
     Config,
     Crowdsec,
+    Dns,
 }
 
 impl KindFilter {
-    const ALL: [KindFilter; 7] = [
+    const ALL: [KindFilter; 8] = [
         KindFilter::All,
         KindFilter::Ips,
         KindFilter::Health,
@@ -55,6 +57,7 @@ impl KindFilter {
         KindFilter::Device,
         KindFilter::Config,
         KindFilter::Crowdsec,
+        KindFilter::Dns,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -65,6 +68,7 @@ impl KindFilter {
             KindFilter::Device => "New devices",
             KindFilter::Config => "Config changes",
             KindFilter::Crowdsec => "CrowdSec",
+            KindFilter::Dns => "DNS",
         }
     }
     fn matches(self, kind: &str) -> bool {
@@ -76,6 +80,7 @@ impl KindFilter {
             KindFilter::Device => kind == "device",
             KindFilter::Config => kind == "config",
             KindFilter::Crowdsec => kind == "crowdsec",
+            KindFilter::Dns => kind == "dns",
         }
     }
 }
@@ -109,6 +114,7 @@ enum Bg {
     Rescored { text: String },
     /// Snapshot is stored in Shared; this only reports success / error.
     Health(Result<(), String>),
+    Dns(Option<String>),
     PolicyPlan(Result<ipswatch::ipspolicy::Plan, String>),
     Reload,
 }
@@ -164,6 +170,7 @@ pub struct App {
     policy_busy: bool,
     f_kind: KindFilter,
     health_busy: bool,
+    dns_busy: bool,
 }
 
 fn theme_pref(t: Theme) -> egui::ThemePreference {
@@ -227,6 +234,7 @@ impl App {
             policy_busy: false,
             f_kind: KindFilter::All,
             health_busy: false,
+            dns_busy: false,
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -244,6 +252,7 @@ impl App {
             app.tab = match page {
                 "events" => Tab::Events,
                 "health" => Tab::Health,
+                "dns" => Tab::Dns,
                 "log" => Tab::Log,
                 "settings" => Tab::Settings,
                 _ => Tab::Findings,
@@ -447,6 +456,13 @@ impl App {
                         });
                     }
                 }
+                settings::Action::TestDns => match self.settings.to_config() {
+                    Err(e) => self.message("Test DNS servers", e, true),
+                    Ok(cfg) => self.spawn(move || {
+                        let (text, error) = ipswatch::dns::test(&cfg);
+                        Bg::Message { title: "Test DNS servers".into(), text, error }
+                    }),
+                },
                 settings::Action::TestNotify => match self.settings.to_config() {
                     Err(e) => self.message("Test notification", e, true),
                     Ok(cfg) => self.spawn(move || {
@@ -558,6 +574,18 @@ impl App {
                 Err(e) => Bg::Health(Err(format!("{e:#}"))),
             }
         });
+    }
+
+    /// Run the DNS checks now (in the background).
+    fn check_dns(&mut self) {
+        let cfg = self.ctl.cfg();
+        if cfg.dns.servers.is_empty() {
+            self.message("DNS", "Add your DNS servers in Settings > DNS servers first.", true);
+            return;
+        }
+        self.dns_busy = true;
+        let shared = self.ctl.shared.clone();
+        self.spawn(move || Bg::Dns(ipswatch::monitor::run_dns(&shared, &cfg)));
     }
 
     /// Open the Drop-policy window and start the read-only dry run.
@@ -782,7 +810,7 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
-                for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log")] {
+                for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Dns, "DNS"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log")] {
                     if ui.selectable_label(self.tab == t, l).clicked() {
                         ui.close_menu();
                         self.tab = t;
@@ -878,7 +906,7 @@ impl App {
                 self.ctl.poll_now();
             }
             ui.separator();
-            for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log"), (Tab::Settings, "Settings")] {
+            for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Dns, "DNS"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log"), (Tab::Settings, "Settings")] {
                 if ui.selectable_label(self.tab == t, RichText::new(l).size(15.0)).clicked() {
                     self.tab = t;
                 }
@@ -1326,6 +1354,12 @@ impl eframe::App for App {
                         self.message = Some(("Health check".into(), e, true));
                     }
                 }
+                Bg::Dns(r) => {
+                    self.dns_busy = false;
+                    if let Some(e) = r {
+                        self.message = Some(("DNS check".into(), e, true));
+                    }
+                }
                 Bg::PolicyPlan(p) => {
                     self.policy_busy = false;
                     if self.policy.is_some() {
@@ -1393,6 +1427,30 @@ impl eframe::App for App {
                     .collect();
                 match crate::health_view::show(ui, snap.as_ref(), &problems, self.health_busy) {
                     crate::health_view::Action::CheckNow => self.check_health(),
+                    crate::health_view::Action::OpenFinding(k) => {
+                        self.f_status = StatusFilter::All;
+                        self.f_kind = KindFilter::All;
+                        self.selected = Some(k);
+                        self.tab = Tab::Findings;
+                        self.reload();
+                    }
+                    crate::health_view::Action::None => {}
+                }
+            }
+            Tab::Dns => {
+                let snap = self.ctl.shared.dns.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let problems: Vec<Finding> = self
+                    .ctl
+                    .shared
+                    .store
+                    .list_findings(Some("open"), Severity::Low, 500)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|f| f.kind == "dns")
+                    .collect();
+                let configured = !self.ctl.cfg().dns.servers.is_empty();
+                match crate::dns_view::show(ui, snap.as_ref(), &problems, self.dns_busy, configured) {
+                    crate::health_view::Action::CheckNow => self.check_dns(),
                     crate::health_view::Action::OpenFinding(k) => {
                         self.f_status = StatusFilter::All;
                         self.f_kind = KindFilter::All;

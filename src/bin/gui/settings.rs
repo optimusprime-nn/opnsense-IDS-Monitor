@@ -12,12 +12,13 @@ pub enum Section {
     Notifications,
     AutoBlock,
     Health,
+    Dns,
     Application,
     Data,
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::Firewall,
         Section::Collection,
         Section::Detection,
@@ -25,6 +26,7 @@ impl Section {
         Section::Notifications,
         Section::AutoBlock,
         Section::Health,
+        Section::Dns,
         Section::Application,
         Section::Data,
     ];
@@ -37,6 +39,7 @@ impl Section {
             Section::Notifications => "Notifications",
             Section::AutoBlock => "Auto-block",
             Section::Health => "Health checks",
+            Section::Dns => "DNS servers",
             Section::Application => "Application",
             Section::Data => "Data & storage",
         }
@@ -51,6 +54,7 @@ pub enum Action {
     TestConnection,
     CheckCertificate,
     TestNotify,
+    TestDns,
     TestToast,
     PruneNow,
     Rescore,
@@ -72,6 +76,7 @@ struct Lists {
     policy_rulesets: String,
     ignore_services: String,
     cs_scenarios: String,
+    dns_domains: String,
     smtp_to: String,
     never_block: String,
 }
@@ -129,6 +134,7 @@ impl SettingsForm {
             policy_rulesets: join(&cfg.ips_policy.rulesets),
             ignore_services: join(&cfg.health.ignore_services),
             cs_scenarios: join(&cfg.crowdsec.finding_scenarios),
+            dns_domains: join(&cfg.dns.test_domains),
         };
         self.error = None;
     }
@@ -169,6 +175,12 @@ impl SettingsForm {
                 c.health = def.health;
                 c.crowdsec = def.crowdsec;
             }
+            Section::Dns => {
+                // Keep the servers and their tokens; reset the knobs.
+                let servers = std::mem::take(&mut c.dns.servers);
+                c.dns = def.dns;
+                c.dns.servers = servers;
+            }
             Section::Application => c.gui = def.gui,
             Section::Data => {
                 c.db_path = def.db_path;
@@ -195,6 +207,7 @@ impl SettingsForm {
         c.ips_policy.rulesets = split(&l.policy_rulesets, true);
         c.health.ignore_services = split(&l.ignore_services, true);
         c.crowdsec.finding_scenarios = split(&l.cs_scenarios, true);
+        c.dns.test_domains = split(&l.dns_domains, true);
         c.firewall.correlate_ignore_ports = nums(&l.fw_ignore_ports, "").unwrap_or(c.firewall.correlate_ignore_ports);
         c
     }
@@ -206,6 +219,10 @@ impl SettingsForm {
         c.detect.ignore_sids = nums(&self.lists.ignore_sids, "Ignored signature IDs")?;
         c.firewall.correlate_ignore_ports = nums(&self.lists.fw_ignore_ports, "Ports ignored when correlating")?;
         c.opnsense.url = c.opnsense.url.trim().to_string();
+        for d in &mut c.dns.servers {
+            d.url = d.url.trim().trim_end_matches('/').to_string();
+            d.token = d.token.trim().to_string();
+        }
         c.validate().map_err(|e| format!("{e:#}"))?;
         Ok(c)
     }
@@ -260,6 +277,7 @@ impl SettingsForm {
                     Section::Notifications => self.notifications(ui, actions),
                     Section::AutoBlock => self.autoblock(ui),
                     Section::Health => self.health(ui),
+                    Section::Dns => self.dns(ui, actions),
                     Section::Application => self.application(ui, actions),
                     Section::Data => self.data(ui, db_path, actions),
                 }
@@ -503,6 +521,69 @@ impl SettingsForm {
                 ui.checkbox(&mut cs.boost_ips, "");
             });
         });
+    }
+
+    fn dns(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        ui.label("Watches your Technitium DNS servers: each one answering, upstream failures, blocklists, unusual clients,                   zone and settings changes, and WAN port forwards to them. Results are on the DNS page.");
+        ui.add_space(8.0);
+        let show = self.show_secrets;
+        let d = &mut self.draft.dns;
+        let mut remove = None;
+        for (i, srv) in d.servers.iter_mut().enumerate() {
+            egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                grid(ui, &format!("dns_srv{i}"), |ui| {
+                    row(ui, "Name", "Shown in alerts, e.g. ns1", |ui| {
+                        text(ui, &mut srv.name, 160.0);
+                        if ui.button("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    row(ui, "Web console URL", "e.g. http://192.168.1.99:5380 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
+                    row(ui, "API token", "Technitium: Administration > Sessions > Create Token (a read-only user is enough)", |ui| {
+                        ui.add(TextEdit::singleline(&mut srv.token).password(!show).desired_width(360.0));
+                    });
+                });
+            });
+            ui.add_space(4.0);
+        }
+        if let Some(i) = remove {
+            d.servers.remove(i);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Add DNS server").clicked() {
+                d.servers.push(Default::default());
+            }
+            ui.checkbox(&mut self.show_secrets, "Show tokens");
+        });
+        ui.add_space(10.0);
+        grid(ui, "dns", |ui| {
+            row(ui, "Monitor DNS servers", "", |ui| {
+                ui.checkbox(&mut d.enabled, "");
+            });
+            row(ui, "Check every (minutes)", "", |ui| num(ui, &mut d.interval_minutes, 1..=120));
+            row(ui, "Request timeout (s)", "", |ui| num(ui, &mut d.timeout_seconds, 2..=120));
+            row(ui, "Test lookups", "Names asked of every server on each check; they must resolve", |ui| multi(ui, &mut self.lists.dns_domains, 2));
+            row(ui, "Upstream failure alert (%)", "SERVFAIL share of the last hour's queries", |ui| {
+                ui.add(DragValue::new(&mut d.servfail_pct).range(0.5..=100.0).speed(0.5));
+            });
+            row(ui, "Blocklist age alert (hours)", "", |ui| num(ui, &mut d.blocklist_max_age_hours, 1..=2160));
+            row(ui, "Busy client threshold (queries/hour)", "Below this a client is never unusual", |ui| num(ui, &mut d.client_queries_per_hour, 100..=1_000_000));
+            row(ui, "Busy client factor", "... and it must be this many times its usual hourly rate", |ui| {
+                ui.add(DragValue::new(&mut d.client_spike_factor).range(1.5..=100.0).speed(0.5));
+            });
+            row(ui, "NXDOMAIN burst (per client per check)", "Many lookups of names that don't exist = possible malware (DGA). Needs a query-log app in Technitium", |ui| {
+                num(ui, &mut d.nxdomain_burst, 10..=100_000)
+            });
+            row(ui, "Zone / settings change alerts", "", |ui| {
+                ui.checkbox(&mut d.change_alerts, "");
+            });
+        });
+        ui.add_space(10.0);
+        if ui.button("Test DNS servers").on_hover_text("Uses the values above, saved or not").clicked() {
+            actions.push(Action::TestDns);
+        }
+        ui.add_space(6.0);
+        ui.weak("Tokens are encrypted with Windows DPAPI when saved, like the firewall API key. IPS Watch only reads from the DNS servers.");
     }
 
     fn application(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
