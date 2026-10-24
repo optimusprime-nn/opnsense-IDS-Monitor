@@ -125,6 +125,35 @@ alias = "ipswatch_block"
 min_severity = "critical"
 never_block = []
 
+[ips_policy]
+rulesets = [
+    "abuse.ch.feodotracker",
+    "abuse.ch.sslblacklist",
+    "abuse.ch.sslipblacklist",
+    "abuse.ch.threatfox",
+    "abuse.ch.urlhaus",
+    "botcc",
+    "botcc.portgrouped",
+    "compromised",
+    "drop",
+    "dshield",
+    "ciarmy",
+    "3coresec",
+    "emerging-exploit",
+    "emerging-exploit_kit",
+    "emerging-attack_response",
+    "emerging-malware",
+    "emerging-mobile_malware",
+    "emerging-trojan",
+    "emerging-worm",
+    "emerging-phishing",
+    "emerging-coinminer",
+    "snort_vrt.malware-cnc",
+    "snort_vrt.malware-backdoor",
+    "snort_vrt.exploit-kit",
+    "snort_vrt.indicator-compromise",
+]
+
 [gui]
 theme = "dark"
 autostart_monitor = true

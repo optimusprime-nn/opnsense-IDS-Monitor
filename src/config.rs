@@ -337,6 +337,20 @@ impl Default for GuiCfg {
     }
 }
 
+/// The Drop policy IPS Watch can create on the firewall.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct IpsPolicyCfg {
+    /// Ruleset base names (filename without .rules / et_open. prefix) whose Alert rules become Drop.
+    pub rulesets: Vec<String>,
+}
+
+impl Default for IpsPolicyCfg {
+    fn default() -> Self {
+        Self { rulesets: crate::ipspolicy::DEFAULT_RULESETS.iter().map(|s| s.to_string()).collect() }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -349,6 +363,7 @@ pub struct Config {
     pub firewall: FirewallCfg,
     pub notify: NotifyCfg,
     pub block: BlockCfg,
+    pub ips_policy: IpsPolicyCfg,
     pub gui: GuiCfg,
 }
 
@@ -364,6 +379,7 @@ impl Default for Config {
             firewall: Default::default(),
             notify: Default::default(),
             block: Default::default(),
+            ips_policy: Default::default(),
             gui: Default::default(),
         }
     }

@@ -128,6 +128,15 @@ and firewall-log privileges, plus *Firewall: Alias* if you'll block IPs. Then cr
 - Unticking *Verify TLS certificate* works too, but then the connection, including your API key, can be intercepted.
   Use it only to test.
 
+**Drop policy (let the IPS actually block)**: in IPS mode, rules only block when a policy sets them to
+*Drop*. IPS Watch can create one policy, "IPS Watch - drop high-risk". It switches the Alert rules in high-risk
+rulesets you have enabled (abuse.ch, botcc, compromised, drop/dshield/ciarmy, exploit, exploit_kit,
+attack_response, malware, mobile_malware, phishing, coinminer, worm, Snort malware-cnc/backdoor) to Drop.
+Everything else stays on Alert. You always get a dry run first that lists every ruleset and rule count, and
+nothing changes until you confirm. Use **Set up Drop policy...** (on the banner, or in the Settings menu) or
+`ipswatch-cli ips-policy` (dry run) / `--apply --yes` / `--remove --yes`. The rulesets used are editable in
+*Settings → Signature rules*. The API user needs the Intrusion Detection privilege.
+
 **Blocking**: create a *Host(s)* alias `ipswatch_block` and a WAN **Block** rule at the top with that alias
 as the source. Leave auto-block in dry run until you trust the findings. Internal, private and reserved
 addresses, and anything on the never-block list, are never blocked.

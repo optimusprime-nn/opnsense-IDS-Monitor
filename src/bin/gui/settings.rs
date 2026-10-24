@@ -66,6 +66,7 @@ struct Lists {
     ignore_sources: String,
     informational: String,
     fw_ignore_ports: String,
+    policy_rulesets: String,
     smtp_to: String,
     never_block: String,
 }
@@ -120,6 +121,7 @@ impl SettingsForm {
             never_block: join(&cfg.block.never_block),
             informational: join(&d.informational_prefixes),
             fw_ignore_ports: join(&cfg.firewall.correlate_ignore_ports),
+            policy_rulesets: join(&cfg.ips_policy.rulesets),
         };
         self.error = None;
     }
@@ -152,6 +154,7 @@ impl SettingsForm {
                 c.detect.compromise_categories = def.detect.compromise_categories;
                 c.detect.compromise_keywords = def.detect.compromise_keywords;
                 c.detect.informational_prefixes = def.detect.informational_prefixes;
+                c.ips_policy = def.ips_policy;
             }
             Section::Notifications => c.notify = def.notify,
             Section::AutoBlock => c.block = def.block,
@@ -178,6 +181,7 @@ impl SettingsForm {
         c.detect.sensitive_ports = nums(&l.sensitive_ports, "").unwrap_or(c.detect.sensitive_ports);
         c.detect.ignore_sids = nums(&l.ignore_sids, "").unwrap_or(c.detect.ignore_sids);
         c.detect.informational_prefixes = split(&l.informational, false);
+        c.ips_policy.rulesets = split(&l.policy_rulesets, true);
         c.firewall.correlate_ignore_ports = nums(&l.fw_ignore_ports, "").unwrap_or(c.firewall.correlate_ignore_ports);
         c
     }
@@ -372,6 +376,9 @@ impl SettingsForm {
                 multi(ui, &mut self.lists.informational, 6)
             });
             row(ui, "Compromise categories", "Exact Suricata classtype text, one per line", |ui| multi(ui, &mut self.lists.categories, 10));
+            row(ui, "Drop policy rulesets", "Used by \"Set up Drop policy\": these rulesets' Alert rules become Drop on the firewall", |ui| {
+                multi(ui, &mut self.lists.policy_rulesets, 8)
+            });
             row(ui, "Signature keywords", "Matched case-insensitively inside the signature", |ui| multi(ui, &mut self.lists.keywords, 10));
         });
     }

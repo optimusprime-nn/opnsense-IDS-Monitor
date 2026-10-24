@@ -58,6 +58,7 @@ enum Bg {
     /// Certificate check result, optionally offering a better Firewall URL.
     Cert { text: String, error: bool, suggest_url: Option<String> },
     Rescored { text: String },
+    PolicyPlan(Result<ipswatch::ipspolicy::Plan, String>),
     Reload,
 }
 
@@ -107,6 +108,9 @@ pub struct App {
     /// (alerts in the last 7 days) when none of them were dropped by the IPS.
     not_dropping: Option<i64>,
     rescoring: bool,
+    /// Drop-policy preview window: None = closed; Some(None) = loading.
+    policy: Option<Option<Result<ipswatch::ipspolicy::Plan, String>>>,
+    policy_busy: bool,
 }
 
 fn theme_pref(t: Theme) -> egui::ThemePreference {
@@ -166,6 +170,8 @@ impl App {
             titlebar_dark: None,
             not_dropping: None,
             rescoring: false,
+            policy: None,
+            policy_busy: false,
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -472,6 +478,107 @@ impl App {
         });
     }
 
+    /// Open the Drop-policy window and start the read-only dry run.
+    fn open_policy(&mut self) {
+        let cfg = self.ctl.cfg();
+        if cfg.opnsense.url.is_empty() {
+            self.message("Drop policy", "Configure the firewall connection in Settings first.", true);
+            return;
+        }
+        self.policy = Some(None);
+        self.policy_busy = true;
+        self.spawn(move || {
+            Bg::PolicyPlan(
+                OPNsense::new(&cfg.opnsense)
+                    .and_then(|api| ipswatch::ipspolicy::plan(&api, &cfg.ips_policy.rulesets))
+                    .map_err(|e| format!("{e:#}")),
+            )
+        });
+    }
+
+    fn policy_window(&mut self, ctx: &egui::Context) {
+        let Some(state) = self.policy.clone() else { return };
+        let mut open = true;
+        let mut action: Option<&str> = None;
+        egui::Window::new(RichText::new("Drop policy for high-risk rulesets").strong())
+            .id(egui::Id::new("policy"))
+            .collapsible(false)
+            .resizable(true)
+            .default_size([760.0, 560.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| match &state {
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Reading the firewall's IDS settings and counting rules (read-only)...");
+                    });
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+                }
+                Some(Ok(plan)) => {
+                    ui.label(RichText::new("Dry run - nothing has been changed yet.").strong());
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                        ui.label(RichText::new(plan.render()).monospace());
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let verb = if plan.existing.is_some() { "Update policy" } else { "Apply policy" };
+                        let can = !plan.selected.is_empty() && !self.policy_busy;
+                        if ui.add_enabled(can, egui::Button::new(RichText::new(format!("{verb} ({} rules -> Drop)", plan.total_changes())).strong())).clicked() {
+                            action = Some("apply");
+                        }
+                        if plan.existing.is_some() && ui.add_enabled(!self.policy_busy, egui::Button::new("Remove policy")).clicked() {
+                            action = Some("remove");
+                        }
+                        if ui.button("Close").clicked() {
+                            action = Some("close");
+                        }
+                        if self.policy_busy {
+                            ui.spinner();
+                        }
+                    });
+                }
+            });
+        if !open || action == Some("close") {
+            self.policy = None;
+            return;
+        }
+        let (Some(act), Some(Ok(plan))) = (action, state) else { return };
+        let question = if act == "apply" {
+            format!("Change {} rules from Alert to Drop on the firewall and reload Suricata?\n\nInspected interfaces may pause for a few seconds.", plan.total_changes())
+        } else {
+            "Remove the IPS Watch Drop policy and reload Suricata?".to_string()
+        };
+        let yes = rfd::MessageDialog::new()
+            .set_title("Change firewall IPS policy")
+            .set_description(question)
+            .set_level(rfd::MessageLevel::Warning)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if yes != rfd::MessageDialogResult::Yes {
+            return;
+        }
+        self.policy_busy = true;
+        let cfg = self.ctl.cfg();
+        self.spawn(move || {
+            let r = OPNsense::new(&cfg.opnsense).and_then(|api| {
+                if act == "apply" {
+                    ipswatch::ipspolicy::apply(&api, &plan)
+                } else {
+                    ipswatch::ipspolicy::remove(&api)
+                }
+            });
+            match r {
+                Ok(msg) => Bg::Message { title: "Firewall IPS policy".into(), text: msg, error: false },
+                Err(e) => Bg::Message { title: "Firewall IPS policy".into(), text: format!("{e:#}"), error: true },
+            }
+        });
+        self.policy = None;
+    }
+
     /// Add a signature to the ignore list, save, and re-score.
     fn ignore_sid(&mut self, sid: i64, name: &str) {
         let mut cfg = self.ctl.cfg();
@@ -624,6 +731,11 @@ impl App {
                     }
                 }
                 ui.separator();
+                if ui.button("Firewall Drop policy...").clicked() {
+                    ui.close_menu();
+                    self.open_policy();
+                }
+                ui.separator();
                 // Quick toggles that save immediately.
                 let mut cfg = self.ctl.cfg();
                 let mut changed = false;
@@ -717,6 +829,12 @@ impl App {
                             .color(ui.visuals().warn_fg_color),
                     );
                     ui.label("Either IPS mode is off or no rule policy is set to Drop, so every alert counts as having reached its target.");
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Set up Drop policy...").strong()).on_hover_text("Preview first - nothing changes until you confirm").clicked() {
+                            self.open_policy();
+                        }
+                        ui.weak("or do it by hand:");
+                    });
                     egui::CollapsingHeader::new("How to fix this on OPNsense").id_salt("ipsfix").show(ui, |ui| {
                         ui.label("1. Services > Intrusion Detection > Administration > Settings: tick \"IPS mode\" and Apply.");
                         ui.label("2. Policy tab: add a policy for the rulesets you use, Action = Drop, for the high-risk rule families \
@@ -1111,7 +1229,16 @@ impl eframe::App for App {
 
         while let Ok(m) = self.bg_rx.try_recv() {
             match m {
-                Bg::Message { title, text, error } => self.message = Some((title, text, error)),
+                Bg::Message { title, text, error } => {
+                    self.policy_busy = false;
+                    self.message = Some((title, text, error));
+                }
+                Bg::PolicyPlan(p) => {
+                    self.policy_busy = false;
+                    if self.policy.is_some() {
+                        self.policy = Some(Some(p));
+                    }
+                }
                 Bg::Rescored { text } => {
                     self.rescoring = false;
                     self.message = Some(("Re-score complete".into(), text, false));
@@ -1202,6 +1329,7 @@ impl eframe::App for App {
                 self.suggest_url = None;
             }
         }
+        self.policy_window(ctx);
         if self.about {
             egui::Window::new("About IPS Watch")
                 .collapsible(false)

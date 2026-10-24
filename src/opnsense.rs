@@ -89,6 +89,11 @@ impl OPNsense {
         self.req("GET", path, None, &[])
     }
 
+    /// Raw POST of a JSON body (searches and, for policy changes, writes).
+    pub fn post_raw(&self, path: &str, body: Value) -> Result<Value> {
+        self.req("POST", path, Some(body), &[])
+    }
+
     // ---- IDS ------------------------------------------------------------
     /// Newest-first page of Suricata alerts from the current eve log.
     pub fn ids_alerts(&self, page: u32, rows: u32) -> Result<Vec<Value>> {

@@ -6,6 +6,7 @@ pub mod config;
 pub mod detect;
 pub mod engine;
 pub mod icon;
+pub mod ipspolicy;
 pub mod logbuf;
 pub mod monitor;
 pub mod normalize;

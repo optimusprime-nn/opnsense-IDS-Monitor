@@ -60,6 +60,18 @@ enum Cmd {
     Reopen { key: String },
     /// Write a static HTML report
     Report { out: PathBuf },
+    /// Drop policy for high-risk rulesets on the firewall. Without flags: dry run (changes nothing).
+    IpsPolicy {
+        /// Create/update the policy and reload Suricata (requires --yes)
+        #[arg(long)]
+        apply: bool,
+        /// Remove the policy and reload Suricata (requires --yes)
+        #[arg(long, conflicts_with = "apply")]
+        remove: bool,
+        /// Confirm --apply / --remove
+        #[arg(long)]
+        yes: bool,
+    },
     /// Recompute all findings from stored events with the current rules (keeps your ack/false-positive marks)
     Rescore,
     /// Print raw alert rows from the firewall API (diagnostics)
@@ -68,7 +80,12 @@ enum Cmd {
         rows: u32,
     },
     /// GET any API path and print the JSON, e.g. diagnostics/interface/get_interface_config
-    DumpApi { path: String },
+    DumpApi {
+        path: String,
+        /// Send this JSON as a POST body (only use with search_* endpoints)
+        #[arg(long)]
+        post: Option<String>,
+    },
     /// Print raw firewall log rows from the API (diagnostics)
     DumpFirewallLog {
         #[arg(default_value_t = 3)]
@@ -150,6 +167,22 @@ fn main() -> Result<()> {
         Cmd::Fp { key } => store.set_status(&key, "false_positive")?,
         Cmd::Reopen { key } => store.set_status(&key, "open")?,
         Cmd::Report { out } => println!("wrote {} ({} findings)", out.display(), report::write_html(&store, &out)?),
+        Cmd::IpsPolicy { apply, remove, yes } => {
+            let a = api()?;
+            if remove {
+                anyhow::ensure!(yes, "Removing changes the firewall: add --yes to confirm.");
+                println!("{}", ipswatch::ipspolicy::remove(&a)?);
+            } else {
+                let plan = ipswatch::ipspolicy::plan(&a, &cfg.ips_policy.rulesets)?;
+                println!("{}", plan.render());
+                if apply {
+                    anyhow::ensure!(yes, "\nThis was a dry run. Add --yes to apply it.");
+                    println!("\n{}", ipswatch::ipspolicy::apply(&a, &plan)?);
+                } else {
+                    println!("\nDRY RUN - nothing was changed. Apply with: ipswatch-cli ips-policy --apply --yes");
+                }
+            }
+        }
         Cmd::Rescore => {
             if !cfg.opnsense.url.is_empty() {
                 engine::refresh_own_addresses(&store, &api()?, true);
@@ -163,7 +196,13 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&r)?);
             }
         }
-        Cmd::DumpApi { path } => println!("{}", serde_json::to_string_pretty(&api()?.get_raw(&path)?)?),
+        Cmd::DumpApi { path, post } => {
+            let v = match post {
+                Some(body) => api()?.post_raw(&path, serde_json::from_str(&body)?)?,
+                None => api()?.get_raw(&path)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&v)?)
+        }
         Cmd::DumpFirewallLog { rows } => {
             for r in api()?.firewall_log(rows)? {
                 println!("{}", serde_json::to_string_pretty(&r)?);
