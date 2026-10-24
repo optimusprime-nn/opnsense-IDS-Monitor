@@ -93,19 +93,27 @@ pub struct Snapshot {
     pub devices: Vec<Device>,
     pub new_devices: usize,
     pub config_changes: Vec<ConfigChange>,
+    /// None when CrowdSec isn't installed (or the check is off).
+    pub crowdsec: Option<crate::crowdsec::Status>,
     /// Checks that couldn't run (missing privilege, endpoint not present...).
     pub errors: Vec<String>,
 }
 
 /// A problem found by a check; becomes (or updates) a finding.
 #[derive(Clone, Debug)]
-struct Problem {
-    key: String,
-    kind: &'static str,
-    severity: Severity,
-    title: String,
-    reasons: Vec<String>,
-    targets: Vec<String>,
+pub struct Problem {
+    pub key: String,
+    pub kind: &'static str,
+    pub severity: Severity,
+    pub title: String,
+    pub reasons: Vec<String>,
+    pub targets: Vec<String>,
+}
+
+impl Problem {
+    pub fn health(key: &str, severity: Severity, title: &str, reasons: Vec<String>) -> Self {
+        Problem { key: key.into(), kind: "health", severity, title: title.into(), reasons, targets: vec![] }
+    }
 }
 
 fn score_for(s: Severity) -> i64 {
@@ -623,6 +631,15 @@ pub fn run(cfg: &Config, store: &Store, api: &OPNsense) -> Result<(Snapshot, Vec
     }
     check!("devices", check_devices(cfg, store, api, &mut snap, &mut problems));
     check!("config", check_config(cfg, store, api, &mut snap, &mut problems));
+    if cfg.crowdsec.enabled {
+        match crate::crowdsec::check(cfg, store, api, &mut problems) {
+            Ok(st) => snap.crowdsec = st,
+            Err(e) => {
+                warn!("health check 'crowdsec' failed: {e:#}");
+                snap.errors.push(format!("crowdsec: {e:#}"));
+            }
+        }
+    }
 
     let alerted = sync(cfg, store, &problems, &resolvable)?;
     Ok((snap, alerted))

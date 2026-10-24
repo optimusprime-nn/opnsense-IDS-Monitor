@@ -54,7 +54,17 @@ pub fn run_detection(
     };
 
     let mut alerted = Vec::new();
-    for f in detect::analyze(&events, &cfg.detect, &nets, fw.as_ref()) {
+    let bans = if cfg.crowdsec.enabled && cfg.crowdsec.boost_ips { crate::crowdsec::cached_bans(store) } else { Default::default() };
+    for mut f in detect::analyze(&events, &cfg.detect, &nets, fw.as_ref()) {
+        // Known attacker: CrowdSec (local detection or community blocklist) has banned this source.
+        if f.kind == "inbound" {
+            if let Some(b) = bans.get(&f.subject_ip) {
+                let place = [b.country.as_str(), b.network.as_str()].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", ");
+                f.reasons.push(format!("CrowdSec has banned this IP: {}{}", b.reason, if place.is_empty() { String::new() } else { format!(" ({place})") }));
+                f.score += 20;
+                f.severity = crate::config::Severity::from_score(f.score);
+            }
+        }
         let mut merged = store.upsert_finding(&f)?;
         if merged.status == "false_positive" {
             continue;

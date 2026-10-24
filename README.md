@@ -75,7 +75,12 @@ with alerts, toasts and the red tray icon, and health problems clear themselves 
 | **New devices** | a MAC address not seen before in the ARP table (names from DHCP leases); quiet for 24 h after the first scan while it learns |
 | **Config changes** | each change in the firewall's configuration history, with who and what (MEDIUM if not made by IPS Watch) |
 
-Findings can be filtered by kind (IPS / Health / Exposure / New devices / Config changes) and include
+**CrowdSec** (if the os-crowdsec plugin is installed): the Health page shows whether CrowdSec and its
+firewall bouncer are running and checking in, active bans and recent alerts. Alerts for serious scenarios
+(brute force on the web GUI/SSH, CVE/exploit attempts) become findings; routine ones like port scans are
+only counted. IPS findings from an IP CrowdSec has banned get "CrowdSec has banned this IP" and +20 points.
+
+Findings can be filtered by kind (IPS / Health / Exposure / New devices / Config changes / CrowdSec) and include
 *Resolved*. CLI: `ipswatch-cli health` runs every check once and prints a summary.
 
 The API user needs read access to these pages: Gateways, Services, Diagnostics (system, ARP, firewall log),

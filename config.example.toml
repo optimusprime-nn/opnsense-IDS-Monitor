@@ -169,6 +169,18 @@ device_alerts = true
 device_learning_hours = 24
 config_alerts = true
 
+[crowdsec]
+enabled = true
+finding_scenarios = [
+    "-bf",
+    "bruteforce",
+    "cve-",
+    "exploit",
+    "backdoor",
+]
+bouncer_stale_minutes = 10
+boost_ips = true
+
 [gui]
 theme = "dark"
 autostart_monitor = true

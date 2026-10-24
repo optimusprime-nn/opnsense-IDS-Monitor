@@ -206,6 +206,18 @@ fn main() -> Result<()> {
             for e in &snap.exposure {
                 println!("  {:<22} {:<6} {:<9} {:<22} {}{}", format!("{}:{}", e.target, e.port), e.protocol, e.source.split(' ').next().unwrap_or(""), e.status_label(), e.note, if e.hits > 0 { format!(" ({} hits)", e.hits) } else { String::new() });
             }
+            match &snap.crowdsec {
+                Some(cs) => {
+                    println!("\nCrowdSec: {} · bouncer last seen {} · {} active bans ({} local, {} community) · {} alerts",
+                        if cs.running { "running" } else { "STOPPED" },
+                        if cs.bouncer_last_seen.is_empty() { "never".into() } else { ipswatch::local_time(&cs.bouncer_last_seen) },
+                        cs.active_bans, cs.local_bans, cs.community_bans, cs.alerts_total);
+                    for (sc, n) in &cs.top_scenarios {
+                        println!("  {n:>4}  {sc}");
+                    }
+                }
+                None => println!("\nCrowdSec: not installed"),
+            }
             println!("\nDevices known: {} (new this run: {})", snap.devices.len(), snap.new_devices);
             println!("Recent config changes:");
             for c in snap.config_changes.iter().take(5) {
@@ -216,7 +228,7 @@ fn main() -> Result<()> {
             }
             println!();
             let open = store.list_findings(Some("open"), Severity::Low, 100)?;
-            let mine: Vec<_> = open.iter().filter(|f| matches!(f.kind.as_str(), "health" | "exposure" | "device" | "config")).collect();
+            let mine: Vec<_> = open.iter().filter(|f| matches!(f.kind.as_str(), "health" | "exposure" | "device" | "config" | "crowdsec")).collect();
             println!("Open health/exposure/device/config findings: {}", mine.len());
             for f in mine {
                 println!("  {:<8} {}", f.severity.as_str().to_uppercase(), f.title);

@@ -379,6 +379,30 @@ impl Default for HealthCfg {
     }
 }
 
+/// CrowdSec (os-crowdsec plugin) integration.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CrowdsecCfg {
+    pub enabled: bool,
+    /// Alerts whose scenario contains one of these become findings (others are only counted).
+    pub finding_scenarios: Vec<String>,
+    /// Alert when the firewall bouncer hasn't checked in for this long.
+    pub bouncer_stale_minutes: u32,
+    /// Add points to IPS findings whose source CrowdSec has banned.
+    pub boost_ips: bool,
+}
+
+impl Default for CrowdsecCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            finding_scenarios: ["-bf", "bruteforce", "cve-", "exploit", "backdoor"].map(String::from).to_vec(),
+            bouncer_stale_minutes: 10,
+            boost_ips: true,
+        }
+    }
+}
+
 /// The Drop policy IPS Watch can create on the firewall.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -407,6 +431,7 @@ pub struct Config {
     pub block: BlockCfg,
     pub ips_policy: IpsPolicyCfg,
     pub health: HealthCfg,
+    pub crowdsec: CrowdsecCfg,
     pub gui: GuiCfg,
 }
 
@@ -424,6 +449,7 @@ impl Default for Config {
             block: Default::default(),
             ips_policy: Default::default(),
             health: Default::default(),
+            crowdsec: Default::default(),
             gui: Default::default(),
         }
     }

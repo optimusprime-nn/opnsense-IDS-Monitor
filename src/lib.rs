@@ -3,6 +3,7 @@
 pub mod autostart;
 pub mod collect;
 pub mod config;
+pub mod crowdsec;
 pub mod detect;
 pub mod engine;
 pub mod health;

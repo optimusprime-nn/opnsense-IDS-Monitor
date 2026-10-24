@@ -43,10 +43,19 @@ enum KindFilter {
     Exposure,
     Device,
     Config,
+    Crowdsec,
 }
 
 impl KindFilter {
-    const ALL: [KindFilter; 6] = [KindFilter::All, KindFilter::Ips, KindFilter::Health, KindFilter::Exposure, KindFilter::Device, KindFilter::Config];
+    const ALL: [KindFilter; 7] = [
+        KindFilter::All,
+        KindFilter::Ips,
+        KindFilter::Health,
+        KindFilter::Exposure,
+        KindFilter::Device,
+        KindFilter::Config,
+        KindFilter::Crowdsec,
+    ];
     fn label(self) -> &'static str {
         match self {
             KindFilter::All => "All kinds",
@@ -55,6 +64,7 @@ impl KindFilter {
             KindFilter::Exposure => "Exposure",
             KindFilter::Device => "New devices",
             KindFilter::Config => "Config changes",
+            KindFilter::Crowdsec => "CrowdSec",
         }
     }
     fn matches(self, kind: &str) -> bool {
@@ -65,6 +75,7 @@ impl KindFilter {
             KindFilter::Exposure => kind == "exposure",
             KindFilter::Device => kind == "device",
             KindFilter::Config => kind == "config",
+            KindFilter::Crowdsec => kind == "crowdsec",
         }
     }
 }
@@ -1378,7 +1389,7 @@ impl eframe::App for App {
                     .list_findings(Some("open"), Severity::Low, 500)
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|f| matches!(f.kind.as_str(), "health" | "exposure" | "device" | "config"))
+                    .filter(|f| matches!(f.kind.as_str(), "health" | "exposure" | "device" | "config" | "crowdsec"))
                     .collect();
                 match crate::health_view::show(ui, snap.as_ref(), &problems, self.health_busy) {
                     crate::health_view::Action::CheckNow => self.check_health(),

@@ -329,3 +329,28 @@ fn device_tracking_reports_only_new_macs() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].ip, "192.168.1.43");
 }
+
+#[test]
+fn ips_findings_from_crowdsec_banned_ips_are_boosted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("cs.db")).unwrap();
+    let evs: Vec<Event> = (0..25)
+        .filter_map(|i| normalize(&eve("194.195.208.213", "192.168.1.20", 3389, "ET SCAN RDP", 7, 2, "", "allowed", i)))
+        .collect();
+    store.add_events(&evs, "api").unwrap();
+    let cfg = Config::default();
+    engine::run_detection(&cfg, &store, None, None, false).unwrap();
+    let plain = store.get_finding("inbound:194.195.208.213").unwrap().unwrap().score;
+
+    store.delete_findings().unwrap();
+    store
+        .set_kv(
+            "crowdsec_bans",
+            r#"{"194.195.208.213":{"reason":"firewallservices/pf-scan-multi_ports","country":"US","network":"Akamai Connected Cloud","expires":"3h"}}"#,
+        )
+        .unwrap();
+    engine::run_detection(&cfg, &store, None, None, false).unwrap();
+    let f = store.get_finding("inbound:194.195.208.213").unwrap().unwrap();
+    assert_eq!(f.score, plain + 20);
+    assert!(f.reasons.iter().any(|r| r.contains("CrowdSec has banned this IP") && r.contains("Akamai")), "{:?}", f.reasons);
+}

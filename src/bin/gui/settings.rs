@@ -71,6 +71,7 @@ struct Lists {
     fw_ignore_ports: String,
     policy_rulesets: String,
     ignore_services: String,
+    cs_scenarios: String,
     smtp_to: String,
     never_block: String,
 }
@@ -127,6 +128,7 @@ impl SettingsForm {
             fw_ignore_ports: join(&cfg.firewall.correlate_ignore_ports),
             policy_rulesets: join(&cfg.ips_policy.rulesets),
             ignore_services: join(&cfg.health.ignore_services),
+            cs_scenarios: join(&cfg.crowdsec.finding_scenarios),
         };
         self.error = None;
     }
@@ -163,7 +165,10 @@ impl SettingsForm {
             }
             Section::Notifications => c.notify = def.notify,
             Section::AutoBlock => c.block = def.block,
-            Section::Health => c.health = def.health,
+            Section::Health => {
+                c.health = def.health;
+                c.crowdsec = def.crowdsec;
+            }
             Section::Application => c.gui = def.gui,
             Section::Data => {
                 c.db_path = def.db_path;
@@ -189,6 +194,7 @@ impl SettingsForm {
         c.detect.informational_prefixes = split(&l.informational, false);
         c.ips_policy.rulesets = split(&l.policy_rulesets, true);
         c.health.ignore_services = split(&l.ignore_services, true);
+        c.crowdsec.finding_scenarios = split(&l.cs_scenarios, true);
         c.firewall.correlate_ignore_ports = nums(&l.fw_ignore_ports, "").unwrap_or(c.firewall.correlate_ignore_ports);
         c
     }
@@ -480,6 +486,21 @@ impl SettingsForm {
             row(ui, "Device learning period (hours)", "After the first scan, devices are recorded quietly for this long", |ui| num(ui, &mut h.device_learning_hours, 0..=720));
             row(ui, "Config change alerts", "From the firewall's configuration history", |ui| {
                 ui.checkbox(&mut h.config_alerts, "");
+            });
+        });
+        ui.add_space(12.0);
+        ui.label(RichText::new("CrowdSec").strong());
+        let cs = &mut self.draft.crowdsec;
+        grid(ui, "crowdsec", |ui| {
+            row(ui, "Read CrowdSec", "Needs the os-crowdsec plugin and the API user allowed to read it", |ui| {
+                ui.checkbox(&mut cs.enabled, "");
+            });
+            row(ui, "Scenarios that raise findings", "Matched inside the scenario name; others are only counted (e.g. port scans)", |ui| {
+                multi(ui, &mut self.lists.cs_scenarios, 4)
+            });
+            row(ui, "Bouncer check-in alert (minutes)", "Bans aren't enforced while the bouncer is away", |ui| num(ui, &mut cs.bouncer_stale_minutes, 2..=1440));
+            row(ui, "Boost IPS findings from banned IPs", "+20 points and a \"CrowdSec has banned this IP\" reason", |ui| {
+                ui.checkbox(&mut cs.boost_ips, "");
             });
         });
     }

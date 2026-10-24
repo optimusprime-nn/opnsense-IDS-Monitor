@@ -153,6 +153,64 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
                     });
             });
 
+        // CrowdSec
+        egui::CollapsingHeader::new(RichText::new("CrowdSec").heading()).id_salt("h_cs").default_open(true).show(ui, |ui| match &s.crowdsec {
+            None => {
+                ui.weak("Not installed. Add the os-crowdsec plugin (System > Firmware > Plugins) for community blocklists and brute-force bans.");
+            }
+            Some(cs) => {
+                ui.horizontal_wrapped(|ui| {
+                    let (txt, col) = if cs.running { ("running", good(dark)) } else { ("STOPPED", sev_color(Severity::Critical, dark)) };
+                    ui.label(RichText::new(txt).strong().color(col));
+                    ui.weak(format!(
+                        "· bouncer {} (last seen {}) · {} active bans ({} detected here, {} community) · {} alerts",
+                        if cs.bouncer_enabled { "on" } else { "OFF" },
+                        if cs.bouncer_last_seen.is_empty() { "never".into() } else { ipswatch::local_time(&cs.bouncer_last_seen) },
+                        cs.active_bans,
+                        cs.local_bans,
+                        cs.community_bans,
+                        cs.alerts_total
+                    ));
+                });
+                if !cs.top_scenarios.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak("Top scenarios:");
+                        for (sc, n) in &cs.top_scenarios {
+                            ui.label(format!("{} ×{n}", sc.rsplit('/').next().unwrap_or(sc)));
+                        }
+                    });
+                }
+                TableBuilder::new(ui)
+                    .id_salt("cs_t")
+                    .striped(true)
+                    .max_scroll_height(260.0)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::initial(150.0))
+                    .column(Column::initial(140.0))
+                    .column(Column::initial(60.0))
+                    .column(Column::initial(220.0))
+                    .column(Column::initial(260.0))
+                    .column(Column::remainder())
+                    .header(22.0, |mut h| {
+                        for t in ["Time", "IP", "Country", "Network", "Scenario", "Decision"] {
+                            h.col(|ui| {
+                                ui.strong(t);
+                            });
+                        }
+                    })
+                    .body(|b| {
+                        b.rows(22.0, cs.recent.len(), |mut r| {
+                            let a = &cs.recent[r.index()];
+                            for t in [ipswatch::local_time(&a.created), a.ip.clone(), a.country.clone(), a.network.clone(), a.scenario.clone(), a.decisions.clone()] {
+                                r.col(|ui| {
+                                    ui.label(t);
+                                });
+                            }
+                        });
+                    });
+            }
+        });
+
         // Services
         egui::CollapsingHeader::new(RichText::new("Services").heading()).id_salt("h_svc").default_open(false).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
