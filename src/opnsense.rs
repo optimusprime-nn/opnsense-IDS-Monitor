@@ -58,13 +58,19 @@ impl OPNsense {
         for (k, v) in query {
             r = r.query(k, v);
         }
+        // Reloading Suricata with a large rule set can take minutes.
+        if path.starts_with("ids/service/reconfigure") {
+            r = r.timeout(Duration::from_secs(180));
+        }
+        // Only reads are safe to retry; never repeat a write.
+        let read_only = method == "GET" || path.contains("search") || path.contains("query_alerts");
         let send = |r: ureq::Request| match &body {
             Some(b) => r.send_json(b.clone()),
             None => r.call(),
         };
         let resp = match send(r.clone()) {
             // A dropped connection ("Unexpected EOF", reset) is retried once on a fresh one.
-            Err(ureq::Error::Transport(t)) => {
+            Err(ureq::Error::Transport(t)) if read_only => {
                 log::debug!("{method} {path}: {t}; retrying once");
                 std::thread::sleep(Duration::from_millis(500));
                 send(r)
