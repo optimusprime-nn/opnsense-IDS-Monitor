@@ -79,10 +79,31 @@ flag_score = 50
 ignore_sids = []
 ignore_sources = []
 renotify_minutes = 360
+informational_prefixes = [
+    "OPN_",
+    "ET INFO",
+    "GPL ICMP_INFO",
+    "ET GAMES",
+    "ET CHAT",
+    "GPL CHAT",
+    "ET P2P",
+    "GPL P2P",
+]
 
 [firewall]
 correlate = true
 log_limit = 2000
+correlate_ignore_ports = [
+    53,
+    67,
+    68,
+    123,
+    137,
+    138,
+    1900,
+    5353,
+    5355,
+]
 
 [notify]
 min_severity = "medium"

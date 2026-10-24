@@ -69,15 +69,17 @@ fn firewall_pass_correlation_escalates() {
     let nets = cfg.detect.nets().unwrap();
     let fw = detect::firewall_passes_by_src(
         &[
-            json!({"action": "pass", "src": "203.0.113.20", "dst": "192.168.1.10", "dstport": "443"}),
-            json!({"action": "block", "src": "203.0.113.20", "dst": "192.168.1.10", "dstport": "22"}),
+            json!({"action": "pass", "dir": "in", "src": "203.0.113.20", "dst": "192.168.1.10", "dstport": "443", "__timestamp__": "2026-10-19T12:00:30+00:00"}),
+            json!({"action": "block", "dir": "in", "src": "203.0.113.20", "dst": "192.168.1.10", "dstport": "22"}),
         ],
         &nets,
+        None,
+        &cfg.firewall.correlate_ignore_ports,
     );
     let out = run(&[eve("203.0.113.20", "192.168.1.10", 443, "ET SCAN Nmap", 5, 2, "Misc", "blocked", 0)], Some(&fw));
     let f = &out["inbound:203.0.113.20"];
     assert!(f.title.starts_with("Potential unwanted access"));
-    assert!(f.reasons.iter().any(|r| r.contains("firewall PASSED 1")));
+    assert!(f.reasons.iter().any(|r| r.contains("firewall PASSED 1 inbound")));
 }
 
 #[test]
@@ -176,4 +178,95 @@ fn icon_png_is_valid() {
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     let ico = ipswatch::icon::ico(&[16, 32]);
     assert_eq!(&ico[..4], &[0, 0, 1, 0]);
+}
+
+#[test]
+fn firewall_correlation_ignores_routine_and_out_of_window_traffic() {
+    let cfg = Config::default();
+    let nets = cfg.detect.nets().unwrap();
+    let rows = [
+        json!({"action": "pass", "dir": "in", "src": "203.0.113.9", "dst": "192.168.1.5", "dstport": "123", "__timestamp__": "2026-10-19T12:00:00+00:00"}),
+        json!({"action": "pass", "dir": "in", "src": "203.0.113.9", "dst": "192.168.1.255", "dstport": "445", "__timestamp__": "2026-10-19T12:00:00+00:00"}),
+        json!({"action": "pass", "dir": "out", "src": "203.0.113.9", "dst": "192.168.1.5", "dstport": "445", "__timestamp__": "2026-10-19T12:00:00+00:00"}),
+        json!({"action": "pass", "dir": "in", "src": "203.0.113.9", "dst": "192.168.1.5", "dstport": "445", "__timestamp__": "2026-10-19T09:00:00+00:00"}),
+        json!({"action": "pass", "dir": "in", "src": "203.0.113.9", "dst": "192.168.1.5", "dstport": "3389", "__timestamp__": "2026-10-19T11:58:00+00:00"}),
+    ];
+    let w = detect::window("2026-10-19T12:05:00.000000+00:00", 15);
+    let fw = detect::firewall_passes_by_src(&rows, &nets, Some((&w.0, &w.1)), &cfg.firewall.correlate_ignore_ports);
+    let passes = &fw["203.0.113.9"];
+    assert_eq!(passes.len(), 1, "only the in-window inbound RDP pass counts");
+    assert_eq!(passes[0].dstport, "3389");
+}
+
+#[test]
+fn firewall_own_address_is_not_an_attacker() {
+    let cfg = Config::default();
+    let own: std::net::IpAddr = "203.0.113.158".parse().unwrap();
+    let nets = cfg.detect.nets().unwrap().with_own(vec![own]);
+    let evs: Vec<Event> = (0..25)
+        .map(|i| eve("203.0.113.158", "192.168.1.77", 22, "ET SCAN Potential SSH Scan", 2001219, 3, "", "allowed", i))
+        .filter_map(|v| normalize(&v))
+        .collect();
+    let out = detect::analyze(&evs, &cfg.detect, &nets, None);
+    assert!(out.is_empty(), "traffic from the firewall's own address is never scored: {out:?}");
+    // ...but attacks aimed at the WAN address still are.
+    let at_wan: Vec<Event> = (0..3)
+        .map(|i| eve("198.51.100.9", "203.0.113.158", 443, "ET EXPLOIT Something", 1, 0, "", "allowed", i))
+        .filter_map(|v| normalize(&v))
+        .collect();
+    assert!(detect::analyze(&at_wan, &cfg.detect, &nets, None).iter().any(|f| f.key == "inbound:198.51.100.9"));
+}
+
+#[test]
+fn etpro_exploit_without_category_is_flagged() {
+    let raws: Vec<Value> = (0..3)
+        // severity 0 = not provided, as with OPNsense's alert API
+        .map(|i| eve("198.51.100.77", "192.168.1.1", 80, "ETPRO EXPLOIT Possible Asus WRT LAN Backdoor Command Execution", 2809444, 0, "", "allowed", i))
+        .collect();
+    let f = &run(&raws, None)["inbound:198.51.100.77"];
+    assert!(f.reasons.iter().any(|r| r.contains("exploit/malware signature")), "{:?}", f.reasons);
+    assert!(f.severity >= Severity::High, "{:?} {}", f.severity, f.score);
+}
+
+#[test]
+fn informational_rules_are_not_scored() {
+    let raws: Vec<Value> = (0..40)
+        .map(|i| eve("192.168.1.50", "45.57.8.1", 53, "OPN_Media_Streaming - Netflix - DNS request for netflix.com", 55000021, 3, "", "allowed", i))
+        .collect();
+    assert!(run(&raws, None).is_empty());
+}
+
+#[test]
+fn reasons_do_not_pile_up_across_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("r.db")).unwrap();
+    let mut f = detect::analyze(
+        &(0..25).filter_map(|i| normalize(&eve("203.0.113.66", "192.168.1.20", 3389, "ET SCAN RDP", 7, 2, "", "allowed", i))).collect::<Vec<_>>(),
+        &Config::default().detect,
+        &Config::default().detect.nets().unwrap(),
+        None,
+    )
+    .remove(0);
+    store.upsert_finding(&f).unwrap();
+    f.reasons[0] = "firewall PASSED 12 inbound connection(s) from this source to: x".into();
+    store.upsert_finding(&f).unwrap();
+    f.reasons[0] = "firewall PASSED 13 inbound connection(s) from this source to: x".into();
+    let m = store.upsert_finding(&f).unwrap();
+    assert_eq!(m.reasons.iter().filter(|r| r.contains("firewall PASSED")).count(), 1, "{:?}", m.reasons);
+}
+
+#[test]
+fn attacks_on_the_firewall_itself_are_not_access_to_internal_hosts() {
+    let cfg = Config::default();
+    let nets = cfg.detect.nets().unwrap().with_own(vec!["203.0.113.158".parse().unwrap()]);
+    let evs = |sig: &str, port: i64, n: i64| -> Vec<Event> {
+        (0..n).filter_map(|i| normalize(&eve("16.5.0.240", "203.0.113.158", port, sig, 2809444, 0, "", "allowed", i))).collect()
+    };
+    let out = detect::analyze(&evs("ETPRO EXPLOIT Possible Asus WRT LAN Backdoor Command Execution", 9999, 4), &cfg.detect, &nets, None);
+    let f = &out[0];
+    assert!(f.title.starts_with("Attack attempts against the firewall"), "{}", f.title);
+    assert_eq!(f.severity, Severity::Medium);
+    assert!(!f.reasons.iter().any(|r| r.contains("reached internal host")));
+    // A single background scan of the WAN isn't a finding at all.
+    assert!(detect::analyze(&evs("ET SCAN Zmap User-Agent (Inbound)", 443, 1), &cfg.detect, &nets, None).is_empty());
 }

@@ -75,7 +75,26 @@ at score ≥ 50; severity is medium ≥ 50, high ≥ 80, critical ≥ 120.
 | ≥ 10 distinct hosts (sweep) / ≥ 15 distinct ports (port scan) | 25 each |
 | **Firewall log shows PASSED connections from the source to internal hosts** | 40 |
 
-Titled *"Potential unwanted access from X"* if traffic got through, otherwise *"Blocked attack activity from X"*.
+Titled *"Potential unwanted access from X"* if traffic got through to a host behind the firewall,
+*"Attack attempts against the firewall from X"* if it only hit the firewall's own addresses (no
+"reached internal host" points), otherwise *"Blocked attack activity from X"*.
+
+**How noise is kept out**
+- **Informational rules are shown but never scored.** These are signatures starting with `OPN_` (app detection),
+  `ET INFO`, `GPL ICMP_INFO`, P2P, chat and games. You can edit the list in *Settings → Signature rules*.
+- **Ignore a signature in one click.** Right-click an event, or use **Ignore** next to a signature on a finding.
+  It's added to the ignored SIDs and your data is re-scored.
+- **The firewall's own addresses are recognised automatically.** IPS Watch reads them from the API hourly.
+  Traffic *from* them is never scored, because it's the firewall itself or NAT'd/hairpinned client traffic.
+- **Severity is worked out from the rule family when the API doesn't send it.** OPNsense's alert API omits
+  severity and category, so ET/ETPRO EXPLOIT, MALWARE, TROJAN and CNC count as high, and SCAN, DROP and TOR
+  as medium.
+- **Firewall-log correlation is strict.** It only counts *inbound* passes inside the alert window, and skips
+  broadcast/multicast and routine ports (DNS, DHCP, NTP, NetBIOS, SSDP, mDNS; editable).
+- **A banner warns when the IPS hasn't dropped anything for a week.** That means IPS mode is off or no policy is
+  set to Drop.
+- **Re-score after changing rules.** Use *Settings → Data & storage → Re-score all findings* or
+  `ipswatch-cli rescore`. It keeps your acknowledged and false-positive marks.
 
 **Compromise findings (an internal host is the source)**: a trojan/C2/exploit indicator (60),
 internal→internal severity ≤ 2 (lateral movement, 30), outbound malicious traffic not dropped (20),

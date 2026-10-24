@@ -60,6 +60,20 @@ enum Cmd {
     Reopen { key: String },
     /// Write a static HTML report
     Report { out: PathBuf },
+    /// Recompute all findings from stored events with the current rules (keeps your ack/false-positive marks)
+    Rescore,
+    /// Print raw alert rows from the firewall API (diagnostics)
+    DumpAlerts {
+        #[arg(default_value_t = 3)]
+        rows: u32,
+    },
+    /// GET any API path and print the JSON, e.g. diagnostics/interface/get_interface_config
+    DumpApi { path: String },
+    /// Print raw firewall log rows from the API (diagnostics)
+    DumpFirewallLog {
+        #[arg(default_value_t = 3)]
+        rows: u32,
+    },
 }
 
 fn print_findings(store: &Store, all: bool, min: Severity, limit: usize) -> Result<()> {
@@ -136,6 +150,25 @@ fn main() -> Result<()> {
         Cmd::Fp { key } => store.set_status(&key, "false_positive")?,
         Cmd::Reopen { key } => store.set_status(&key, "open")?,
         Cmd::Report { out } => println!("wrote {} ({} findings)", out.display(), report::write_html(&store, &out)?),
+        Cmd::Rescore => {
+            if !cfg.opnsense.url.is_empty() {
+                engine::refresh_own_addresses(&store, &api()?, true);
+            }
+            let r = engine::rescore(&cfg, &store)?;
+            println!("re-scored {} events: {} findings before, {} after", r.events, r.before, r.after);
+            print_findings(&store, true, Severity::Low, 50)?;
+        }
+        Cmd::DumpAlerts { rows } => {
+            for r in api()?.ids_alerts(1, rows)? {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
+        Cmd::DumpApi { path } => println!("{}", serde_json::to_string_pretty(&api()?.get_raw(&path)?)?),
+        Cmd::DumpFirewallLog { rows } => {
+            for r in api()?.firewall_log(rows)? {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
     }
     Ok(())
 }

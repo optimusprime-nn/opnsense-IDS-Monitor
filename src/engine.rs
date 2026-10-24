@@ -32,11 +32,19 @@ pub fn run_detection(
     if events.is_empty() {
         return Ok(vec![]);
     }
-    let nets = cfg.detect.nets()?;
+    if let Some(api) = api {
+        refresh_own_addresses(store, api, false);
+    }
+    let nets = cfg.detect.nets()?.with_own(own_addresses(store));
 
     let fw = match api {
         Some(api) if cfg.firewall.correlate => match api.firewall_log(cfg.firewall.log_limit) {
-            Ok(rows) => Some(detect::firewall_passes_by_src(&rows, &nets)),
+            Ok(rows) => Some(detect::firewall_passes_by_src(
+                &rows,
+                &nets,
+                Some((&start, &end)),
+                &cfg.firewall.correlate_ignore_ports,
+            )),
             Err(e) => {
                 warn!("firewall log correlation skipped: {e:#}");
                 None
@@ -71,6 +79,43 @@ pub fn run_detection(
         }
     }
     Ok(alerted)
+}
+
+/// The firewall's own interface addresses, as last detected.
+pub fn own_addresses(store: &Store) -> Vec<IpAddr> {
+    store
+        .get_kv("own_ips")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect()
+}
+
+/// Re-read the firewall's interface addresses (at most hourly unless `force`).
+pub fn refresh_own_addresses(store: &Store, api: &OPNsense, force: bool) {
+    let fresh = store
+        .get_kv("own_ips_at")
+        .ok()
+        .flatten()
+        .and_then(|t| crate::parse_iso(&t))
+        .is_some_and(|t| Utc::now() - t < Duration::hours(1));
+    if fresh && !force {
+        return;
+    }
+    match api.interface_addresses() {
+        Ok(ips) => {
+            let list: Vec<String> = ips.iter().map(|i| i.to_string()).collect();
+            if store.get_kv("own_ips").ok().flatten().as_deref() != Some(&serde_json::to_string(&list).unwrap_or_default()) {
+                log::info!("Firewall addresses (treated as internal): {}", list.join(", "));
+            }
+            let _ = store.set_kv("own_ips", &serde_json::to_string(&list).unwrap_or_default());
+            let _ = store.set_kv("own_ips_at", &crate::now_iso());
+        }
+        Err(e) => warn!("could not read the firewall's interface addresses: {e:#}"),
+    }
 }
 
 fn should_notify(cfg: &Config, f: &Finding) -> bool {
@@ -137,6 +182,37 @@ pub fn replay(cfg: &Config, store: &Store, do_notify: bool) -> Result<usize> {
         t += step;
     }
     Ok(n)
+}
+
+pub struct RescoreResult {
+    pub events: usize,
+    pub before: usize,
+    pub after: usize,
+}
+
+/// Recompute every finding from the stored events with the current rules.
+///
+/// Your marks (acknowledged / false positive), block times and notification state are carried
+/// over by key; findings that no longer qualify disappear. Re-scored findings are marked as
+/// already notified so this never triggers a burst of alerts.
+pub fn rescore(cfg: &Config, store: &Store) -> Result<RescoreResult> {
+    let old = store.list_findings(None, crate::config::Severity::Low, usize::MAX)?;
+    let events = store.first_last_ts().map(|_| store.event_count_since("")).unwrap_or(Ok(0))? as usize;
+    store.delete_findings()?;
+    replay(cfg, store, false)?;
+    let now = crate::now_iso();
+    let after = store.list_findings(None, crate::config::Severity::Low, usize::MAX)?;
+    for f in &after {
+        match old.iter().find(|o| o.key == f.key) {
+            Some(o) => {
+                store.set_status(&f.key, &o.status)?;
+                store.set_blocked(&f.key, o.blocked_at.as_deref())?;
+                store.set_notified(&f.key, o.notified_at.as_deref().unwrap_or(&now), o.notified_severity.unwrap_or(f.severity))?;
+            }
+            None => store.set_notified(&f.key, &now, f.severity)?,
+        }
+    }
+    Ok(RescoreResult { events, before: old.len(), after: after.len() })
 }
 
 /// Delete events older than the retention period.

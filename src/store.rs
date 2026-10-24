@@ -100,7 +100,7 @@ fn event_from_row(r: &Row) -> rusqlite::Result<Event> {
         sid: r.get(8)?,
         signature: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
         category: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
-        severity: r.get::<_, Option<i64>>(11)?.unwrap_or(3),
+        severity: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
         action: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
         flow_id: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
         app_proto: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
@@ -132,6 +132,11 @@ impl Store {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(SCHEMA)?;
+        // v0.2 stored API events (which never carry a severity) as severity 3; mark them unknown.
+        if db.query_row("SELECT v FROM kv WHERE k = 'migr_api_sev'", [], |r| r.get::<_, String>(0)).optional()?.is_none() {
+            db.execute("UPDATE events SET severity = 0 WHERE source = 'api' AND severity = 3", [])?;
+            db.execute("INSERT OR REPLACE INTO kv (k, v) VALUES ('migr_api_sev', '1')", [])?;
+        }
         Ok(Store { db: Mutex::new(db) })
     }
 
@@ -229,12 +234,13 @@ impl Store {
                 let mut m = prev.clone();
                 m.last_seen = prev.last_seen.clone().max(f.last_seen.clone());
                 m.first_seen = prev.first_seen.clone().min(f.first_seen.clone());
-                m.score = prev.score.max(f.score);
-                if f.severity > prev.severity {
+                if f.score >= prev.score {
+                    // The strongest assessment wins: its score, severity, title and reasons.
+                    m.score = f.score;
                     m.severity = f.severity;
                     m.title = f.title.clone();
+                    m.reasons = f.reasons.clone();
                 }
-                m.reasons = merge(&prev.reasons, &f.reasons, 30);
                 m.targets = merge(&prev.targets, &f.targets, 50);
                 m.signatures = merge(&prev.signatures, &f.signatures, 30);
                 m.event_count = prev.event_count.max(f.event_count);
@@ -293,6 +299,20 @@ impl Store {
         rows.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.last_seen.cmp(&a.last_seen)));
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    pub fn delete_findings(&self) -> Result<()> {
+        self.conn().execute("DELETE FROM findings", [])?;
+        Ok(())
+    }
+
+    /// (total, dropped) alert counts since `since`.
+    pub fn action_counts_since(&self, since: &str) -> Result<(i64, i64)> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*), COALESCE(SUM(action IN ('blocked','drop','dropped','rejected')), 0) FROM events WHERE ts >= ?1",
+            [since],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     pub fn delete_all(&self) -> Result<()> {

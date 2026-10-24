@@ -50,6 +50,7 @@ pub enum Action {
     TestNotify,
     TestToast,
     PruneNow,
+    Rescore,
     DeleteAll,
     OpenDataFolder,
 }
@@ -63,6 +64,8 @@ struct Lists {
     keywords: String,
     ignore_sids: String,
     ignore_sources: String,
+    informational: String,
+    fw_ignore_ports: String,
     smtp_to: String,
     never_block: String,
 }
@@ -73,6 +76,8 @@ pub struct SettingsForm {
     pub section: Section,
     pub error: Option<String>,
     show_secrets: bool,
+    /// The firewall's own addresses as last detected (display only).
+    pub own_ips: String,
 }
 
 fn join<T: ToString>(v: &[T]) -> String {
@@ -96,7 +101,7 @@ fn nums<T: std::str::FromStr>(s: &str, what: &str) -> Result<Vec<T>, String> {
 
 impl SettingsForm {
     pub fn new(cfg: &Config) -> Self {
-        let mut f = SettingsForm { draft: cfg.clone(), lists: Lists::default(), section: Section::Firewall, error: None, show_secrets: false };
+        let mut f = SettingsForm { draft: cfg.clone(), lists: Lists::default(), section: Section::Firewall, error: None, show_secrets: false, own_ips: String::new() };
         f.load(cfg);
         f
     }
@@ -113,6 +118,8 @@ impl SettingsForm {
             ignore_sources: join(&d.ignore_sources),
             smtp_to: join(&cfg.notify.smtp_to),
             never_block: join(&cfg.block.never_block),
+            informational: join(&d.informational_prefixes),
+            fw_ignore_ports: join(&cfg.firewall.correlate_ignore_ports),
         };
         self.error = None;
     }
@@ -133,13 +140,18 @@ impl SettingsForm {
             }
             Section::Collection => c.syslog = def.syslog,
             Section::Detection => {
-                let rules = (c.detect.compromise_categories.clone(), c.detect.compromise_keywords.clone());
+                let rules = (
+                    c.detect.compromise_categories.clone(),
+                    c.detect.compromise_keywords.clone(),
+                    c.detect.informational_prefixes.clone(),
+                );
                 c.detect = def.detect;
-                (c.detect.compromise_categories, c.detect.compromise_keywords) = rules;
+                (c.detect.compromise_categories, c.detect.compromise_keywords, c.detect.informational_prefixes) = rules;
             }
             Section::Rules => {
                 c.detect.compromise_categories = def.detect.compromise_categories;
                 c.detect.compromise_keywords = def.detect.compromise_keywords;
+                c.detect.informational_prefixes = def.detect.informational_prefixes;
             }
             Section::Notifications => c.notify = def.notify,
             Section::AutoBlock => c.block = def.block,
@@ -165,6 +177,8 @@ impl SettingsForm {
         c.block.never_block = split(&l.never_block, true);
         c.detect.sensitive_ports = nums(&l.sensitive_ports, "").unwrap_or(c.detect.sensitive_ports);
         c.detect.ignore_sids = nums(&l.ignore_sids, "").unwrap_or(c.detect.ignore_sids);
+        c.detect.informational_prefixes = split(&l.informational, false);
+        c.firewall.correlate_ignore_ports = nums(&l.fw_ignore_ports, "").unwrap_or(c.firewall.correlate_ignore_ports);
         c
     }
 
@@ -173,6 +187,7 @@ impl SettingsForm {
         let mut c = self.to_config_unchecked();
         c.detect.sensitive_ports = nums(&self.lists.sensitive_ports, "Sensitive ports")?;
         c.detect.ignore_sids = nums(&self.lists.ignore_sids, "Ignored signature IDs")?;
+        c.firewall.correlate_ignore_ports = nums(&self.lists.fw_ignore_ports, "Ports ignored when correlating")?;
         c.opnsense.url = c.opnsense.url.trim().to_string();
         c.validate().map_err(|e| format!("{e:#}"))?;
         Ok(c)
@@ -270,6 +285,9 @@ impl SettingsForm {
                 ui.checkbox(&mut d.firewall.correlate, "");
             });
             row(ui, "Firewall log rows", "Rows fetched per detection pass", |ui| num(ui, &mut d.firewall.log_limit, 100..=50000));
+            row(ui, "Ignore ports when correlating", "Routine services (DNS, DHCP, NTP, NetBIOS...) - passed traffic to these isn't counted", |ui| {
+                multi(ui, &mut self.lists.fw_ignore_ports, 2)
+            });
         });
         ui.add_space(8.0);
         egui::CollapsingHeader::new("Do I need a CA certificate file? Where do I find it?")
@@ -301,6 +319,10 @@ impl SettingsForm {
             actions.push(Action::TestConnection);
         }
         ui.add_space(6.0);
+        if !self.own_ips.is_empty() {
+            ui.weak(format!("Firewall's own addresses (auto-detected hourly, treated as internal): {}", self.own_ips));
+            ui.add_space(4.0);
+        }
         ui.weak("The API key, API secret and SMTP password are encrypted with Windows DPAPI when saved, so only your Windows account can read them.");
     }
 
@@ -342,9 +364,13 @@ impl SettingsForm {
     }
 
     fn rules(&mut self, ui: &mut Ui) {
-        ui.label("Alerts matching these mark an attack as an exploit, or an internal host as compromised.");
+        ui.label("Alerts matching these mark an attack as an exploit, or an internal host as compromised. \
+                  ET / ETPRO EXPLOIT, MALWARE, TROJAN, CNC and similar rule families always count.");
         ui.add_space(8.0);
         grid(ui, "rules", |ui| {
+            row(ui, "Informational rules (not scored)", "Signature prefixes shown in IPS events but never flagged - app detection, ET INFO, P2P...", |ui| {
+                multi(ui, &mut self.lists.informational, 6)
+            });
             row(ui, "Compromise categories", "Exact Suricata classtype text, one per line", |ui| multi(ui, &mut self.lists.categories, 10));
             row(ui, "Signature keywords", "Matched case-insensitively inside the signature", |ui| multi(ui, &mut self.lists.keywords, 10));
         });
@@ -453,6 +479,9 @@ impl SettingsForm {
         ui.horizontal(|ui| {
             if ui.button("Open data folder").clicked() {
                 actions.push(Action::OpenDataFolder);
+            }
+            if ui.button("Re-score all findings").on_hover_text("Recompute findings from stored events with the current rules. Keeps your acknowledged / false-positive marks.").clicked() {
+                actions.push(Action::Rescore);
             }
             if ui.button("Delete old events now").clicked() {
                 actions.push(Action::PruneNow);

@@ -111,7 +111,8 @@ pub fn normalize(rec: &Value) -> Option<Event> {
         sid,
         signature,
         category,
-        severity: severity.unwrap_or(3),
+        // 0 = unknown (OPNsense's alert API omits it); detection infers it from the rule family.
+        severity: severity.unwrap_or(0),
         action: action.to_lowercase(),
         flow_id: as_str(obj.get("flow_id")),
         app_proto: as_str(obj.get("app_proto")),

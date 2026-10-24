@@ -113,6 +113,13 @@ pub const DEFAULT_COMPROMISE_KEYWORDS: &[&str] = &[
     "Metasploit", "Meterpreter", "Reverse Shell", "Mimikatz", "ET POLICY PE EXE", "ET ATTACK_RESPONSE",
 ];
 
+pub const DEFAULT_INFORMATIONAL_PREFIXES: &[&str] = &[
+    "OPN_", "ET INFO", "GPL ICMP_INFO", "ET GAMES", "ET CHAT", "GPL CHAT", "ET P2P", "GPL P2P",
+];
+
+/// Ports whose "passed" firewall entries are routine and not evidence of access.
+pub const DEFAULT_CORRELATE_IGNORE_PORTS: &[u16] = &[53, 67, 68, 123, 137, 138, 1900, 5353, 5355];
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct DetectCfg {
@@ -128,6 +135,8 @@ pub struct DetectCfg {
     pub ignore_sids: Vec<i64>,
     pub ignore_sources: Vec<String>,
     pub renotify_minutes: u32,
+    /// Signatures starting with these are shown but never scored (app detection, info rules).
+    pub informational_prefixes: Vec<String>,
 }
 
 impl Default for DetectCfg {
@@ -147,6 +156,7 @@ impl Default for DetectCfg {
             ignore_sids: vec![],
             ignore_sources: vec![],
             renotify_minutes: 360,
+            informational_prefixes: DEFAULT_INFORMATIONAL_PREFIXES.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -156,14 +166,27 @@ impl Default for DetectCfg {
 pub struct Nets {
     internal: Vec<IpNet>,
     ignore: Vec<IpNet>,
+    /// The firewall's own interface addresses (auto-detected); treated as internal.
+    own: Vec<IpAddr>,
 }
 
 impl Nets {
-    pub fn is_internal(&self, ip: &str) -> bool {
-        in_nets(ip, &self.internal)
+    pub fn with_own(mut self, own: Vec<IpAddr>) -> Self {
+        self.own = own;
+        self
     }
+
+    pub fn is_internal(&self, ip: &str) -> bool {
+        in_nets(ip, &self.internal) || self.is_own(ip)
+    }
+    /// Trusted sources, plus the firewall's own addresses: traffic *from* them is the firewall
+    /// itself or NAT'd / hairpinned client traffic, so it can't be attributed to an attacker or
+    /// to one compromised host.
     pub fn is_ignored(&self, ip: &str) -> bool {
-        in_nets(ip, &self.ignore)
+        in_nets(ip, &self.ignore) || self.is_own(ip)
+    }
+    pub fn is_own(&self, ip: &str) -> bool {
+        ip.parse::<IpAddr>().is_ok_and(|a| self.own.contains(&a))
     }
 }
 
@@ -187,7 +210,7 @@ pub fn in_nets(ip: &str, nets: &[IpNet]) -> bool {
 
 impl DetectCfg {
     pub fn nets(&self) -> Result<Nets> {
-        Ok(Nets { internal: parse_nets(&self.internal_networks)?, ignore: parse_nets(&self.ignore_sources)? })
+        Ok(Nets { internal: parse_nets(&self.internal_networks)?, ignore: parse_nets(&self.ignore_sources)?, own: vec![] })
     }
 }
 
@@ -196,11 +219,13 @@ impl DetectCfg {
 pub struct FirewallCfg {
     pub correlate: bool,
     pub log_limit: u32,
+    /// Passed connections to these ports don't count as access (DNS, DHCP, NTP, NetBIOS, SSDP, mDNS...).
+    pub correlate_ignore_ports: Vec<u16>,
 }
 
 impl Default for FirewallCfg {
     fn default() -> Self {
-        Self { correlate: true, log_limit: 2000 }
+        Self { correlate: true, log_limit: 2000, correlate_ignore_ports: DEFAULT_CORRELATE_IGNORE_PORTS.to_vec() }
     }
 }
 

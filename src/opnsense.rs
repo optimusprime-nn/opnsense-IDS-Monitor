@@ -42,6 +42,7 @@ impl OPNsense {
         let agent = ureq::AgentBuilder::new()
             .tls_connector(Arc::new(tls.build()?))
             .timeout(Duration::from_secs(cfg.timeout_seconds.max(5)))
+            .max_idle_connections(0)
             .build();
         Ok(Self {
             base: cfg.url.trim().trim_end_matches('/').to_string(),
@@ -50,15 +51,25 @@ impl OPNsense {
         })
     }
 
+    #[allow(clippy::result_large_err)] // ureq::Error is large by design
     fn req(&self, method: &str, path: &str, body: Option<Value>, query: &[(&str, String)]) -> Result<Value> {
         let url = format!("{}/api/{}", self.base, path.trim_start_matches('/'));
         let mut r = self.agent.request(method, &url).set("Authorization", &self.auth).set("Accept", "application/json");
         for (k, v) in query {
             r = r.query(k, v);
         }
-        let resp = match body {
-            Some(b) => r.send_json(b),
+        let send = |r: ureq::Request| match &body {
+            Some(b) => r.send_json(b.clone()),
             None => r.call(),
+        };
+        let resp = match send(r.clone()) {
+            // A dropped connection ("Unexpected EOF", reset) is retried once on a fresh one.
+            Err(ureq::Error::Transport(t)) => {
+                log::debug!("{method} {path}: {t}; retrying once");
+                std::thread::sleep(Duration::from_millis(500));
+                send(r)
+            }
+            other => other,
         };
         let resp = resp.map_err(|e| match e {
             ureq::Error::Status(401, _) => anyhow!("{method} {path}: HTTP 401 - check the API key and secret"),
@@ -71,6 +82,11 @@ impl OPNsense {
             return Ok(json!({}));
         }
         serde_json::from_str(&text).with_context(|| format!("{method} {path}: response is not JSON"))
+    }
+
+    /// Raw GET of any API path (diagnostics).
+    pub fn get_raw(&self, path: &str) -> Result<Value> {
+        self.req("GET", path, None, &[])
     }
 
     // ---- IDS ------------------------------------------------------------
@@ -88,6 +104,27 @@ impl OPNsense {
     pub fn ids_status(&self) -> Result<String> {
         let v = self.req("GET", "ids/service/status", None, &[])?;
         Ok(v.get("status").and_then(Value::as_str).map(String::from).unwrap_or_else(|| v.to_string()))
+    }
+
+    /// All addresses configured on the firewall's interfaces (WAN, LAN, VLANs, VPNs...).
+    pub fn interface_addresses(&self) -> Result<Vec<std::net::IpAddr>> {
+        fn walk(v: &Value, key: &str, out: &mut Vec<std::net::IpAddr>) {
+            match v {
+                Value::Object(m) => m.iter().for_each(|(k, x)| walk(x, k, out)),
+                Value::Array(a) => a.iter().for_each(|x| walk(x, key, out)),
+                Value::String(s) if key.starts_with("ipaddr") => {
+                    if let Ok(ip) = s.split('%').next().unwrap_or("").parse::<std::net::IpAddr>() {
+                        if !ip.is_loopback() && !out.contains(&ip) {
+                            out.push(ip);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.req("GET", "diagnostics/interface/get_interface_config", None, &[])?, "", &mut out);
+        Ok(out)
     }
 
     // ---- Firewall log ---------------------------------------------------

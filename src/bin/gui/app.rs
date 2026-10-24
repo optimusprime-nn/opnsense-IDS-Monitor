@@ -57,6 +57,7 @@ enum Bg {
     Message { title: String, text: String, error: bool },
     /// Certificate check result, optionally offering a better Firewall URL.
     Cert { text: String, error: bool, suggest_url: Option<String> },
+    Rescored { text: String },
     Reload,
 }
 
@@ -103,6 +104,9 @@ pub struct App {
     tray_hint_shown: bool,
     /// Effective dark/light last pushed to the native title bar.
     titlebar_dark: Option<bool>,
+    /// (alerts in the last 7 days) when none of them were dropped by the IPS.
+    not_dropping: Option<i64>,
+    rescoring: bool,
 }
 
 fn theme_pref(t: Theme) -> egui::ThemePreference {
@@ -160,6 +164,8 @@ impl App {
             log_follow: true,
             tray_hint_shown: ctl.shared.store.get_kv("tray_hint_shown").ok().flatten().is_some(),
             titlebar_dark: None,
+            not_dropping: None,
+            rescoring: false,
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -215,6 +221,12 @@ impl App {
         let since = ipswatch::iso(chrono::Utc::now() - chrono::Duration::hours(24));
         self.events_24h = store.event_count_since(&since).unwrap_or(0);
         self.events = store.recent_events(2000, &self.e_search).unwrap_or_default();
+        let week = ipswatch::iso(chrono::Utc::now() - chrono::Duration::days(7));
+        self.not_dropping = match store.action_counts_since(&week) {
+            Ok((total, 0)) if total >= 20 => Some(total),
+            _ => None,
+        };
+        self.settings.own_ips = engine::own_addresses(store).iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
         self.loaded_version = self.ctl.shared.data_version.load(Ordering::Relaxed);
         self.last_reload = Instant::now();
         let running = self.ctl.is_running();
@@ -396,6 +408,7 @@ impl App {
                     }),
                 },
                 settings::Action::TestToast => toast::show(&notify::sample_finding()),
+                settings::Action::Rescore => self.rescore("Findings recomputed with the current rules."),
                 settings::Action::PruneNow => {
                     let cfg = self.ctl.cfg();
                     match engine::prune(&cfg, &self.ctl.shared.store) {
@@ -427,6 +440,58 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Recompute all findings in the background (monitoring pauses meanwhile).
+    fn rescore(&mut self, why: &str) {
+        if self.rescoring {
+            return;
+        }
+        self.rescoring = true;
+        let ctl = self.ctl.clone();
+        let why = why.to_string();
+        self.spawn(move || {
+            let was_running = ctl.is_running();
+            ctl.stop();
+            let cfg = ctl.cfg();
+            if let Ok(api) = OPNsense::new(&cfg.opnsense) {
+                engine::refresh_own_addresses(&ctl.shared.store, &api, true);
+            }
+            let r = engine::rescore(&cfg, &ctl.shared.store);
+            if was_running {
+                ctl.start();
+            }
+            ctl.shared.bump();
+            match r {
+                Ok(r) => {
+                    log::info!("Re-scored {} events ({why}): {} findings before, {} after", r.events, r.before, r.after);
+                    Bg::Rescored { text: format!("{why}\n\nRe-scored {} stored events: {} findings before, {} now.", r.events, r.before, r.after) }
+                }
+                Err(e) => Bg::Message { title: "Re-score failed".into(), text: format!("{e:#}"), error: true },
+            }
+        });
+    }
+
+    /// Add a signature to the ignore list, save, and re-score.
+    fn ignore_sid(&mut self, sid: i64, name: &str) {
+        let mut cfg = self.ctl.cfg();
+        if cfg.detect.ignore_sids.contains(&sid) {
+            return;
+        }
+        let draft_dirty = self.settings.is_dirty(&cfg);
+        cfg.detect.ignore_sids.push(sid);
+        if let Err(e) = config::save(&cfg, &self.ctl.cfg_path) {
+            self.message("Ignore signature", format!("Could not save: {e:#}"), true);
+            return;
+        }
+        *self.ctl.shared.cfg.write().unwrap_or_else(|e| e.into_inner()) = cfg.clone();
+        if !draft_dirty {
+            let section = self.settings.section;
+            self.settings.load(&cfg);
+            self.settings.section = section;
+        }
+        log::info!("Ignoring signature {sid} ({name})");
+        self.rescore(&format!("Signature {sid} is now ignored:\n{name}\n\nUndo in Settings > Detection > Ignored signature IDs."));
     }
 
     /// Switch theme now and save it (other unsaved settings edits stay in the draft).
@@ -638,6 +703,29 @@ impl App {
 
     fn findings_view(&mut self, ui: &mut Ui) {
         let dark = ui.visuals().dark_mode;
+        if let Some(total) = self.not_dropping {
+            egui::Frame::new()
+                .fill(ui.visuals().warn_fg_color.gamma_multiply(0.15))
+                .stroke(egui::Stroke::new(1.0_f32, ui.visuals().warn_fg_color))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new(format!("Your IPS hasn't dropped any of the last {total} alerts (7 days)"))
+                            .strong()
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                    ui.label("Either IPS mode is off or no rule policy is set to Drop, so every alert counts as having reached its target.");
+                    egui::CollapsingHeader::new("How to fix this on OPNsense").id_salt("ipsfix").show(ui, |ui| {
+                        ui.label("1. Services > Intrusion Detection > Administration > Settings: tick \"IPS mode\" and Apply.");
+                        ui.label("2. Policy tab: add a policy for the rulesets you use, Action = Drop, for the high-risk rule families \
+                                  (exploit, malware, trojan, CNC, attack_response, compromised, drop/dshield), then Apply.");
+                        ui.label("3. Leave informational rules (OPN_* app detection, ET INFO, P2P) on Alert so they don't break your traffic.");
+                    });
+                });
+            ui.add_space(6.0);
+        }
         // Summary cards
         ui.horizontal(|ui| {
             for s in Severity::ALL.iter().rev() {
@@ -812,8 +900,20 @@ impl App {
                 ui.label(f.targets.iter().take(40).cloned().collect::<Vec<_>>().join(", "));
                 ui.add_space(8.0);
                 ui.strong("Signatures");
+                let mut ignore: Option<(i64, String)> = None;
                 for s in &f.signatures {
-                    ui.label(format!("•  {s}"));
+                    ui.horizontal_wrapped(|ui| {
+                        let sid = s.strip_prefix('[').and_then(|r| r.split_once(']')).and_then(|(n, _)| n.parse::<i64>().ok());
+                        if let Some(sid) = sid {
+                            if ui.small_button("Ignore").on_hover_text("Never score this signature again (re-scores your data)").clicked() {
+                                ignore = Some((sid, s.clone()));
+                            }
+                        }
+                        ui.label(s);
+                    });
+                }
+                if let Some((sid, name)) = ignore {
+                    self.ignore_sid(sid, &name);
                 }
                 ui.add_space(8.0);
                 if f.kind == "compromise" {
@@ -842,14 +942,17 @@ impl App {
                 self.events = self.ctl.shared.store.recent_events(2000, &self.e_search).unwrap_or_default();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(format!("{} events shown{}  ·  red = not dropped by the IPS", self.events.len(), if self.events.len() == 2000 { " (max)" } else { "" }));
+                ui.weak(format!("{} events shown{}  ·  red = not dropped by the IPS  ·  grey = informational / ignored  ·  right-click a row for actions", self.events.len(), if self.events.len() == 2000 { " (max)" } else { "" }));
             });
         });
         let dark = ui.visuals().dark_mode;
         let red = sev_color(Severity::Critical, dark);
+        let detect_cfg = self.ctl.cfg().detect;
+        let mut ignore: Option<(i64, String)> = None;
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::initial(145.0))
             .column(Column::initial(150.0))
@@ -861,7 +964,7 @@ impl App {
             .column(Column::initial(35.0))
             .column(Column::remainder().at_least(60.0))
             .header(22.0, |mut h| {
-                for t in ["Time", "Source", "Destination", "Proto", "SID", "Signature", "Category", "Sev", "Action"] {
+                for t in ["Time", "Source", "Destination", "Proto", "SID", "Signature", "Type", "Sev", "Action"] {
                     h.col(|ui| {
                         ui.strong(t);
                     });
@@ -870,7 +973,30 @@ impl App {
             .body(|body| {
                 body.rows(22.0, self.events.len(), |mut row| {
                     let e = &self.events[row.index()];
-                    let c = |t: String| if e.was_dropped() { RichText::new(t) } else { RichText::new(t).color(red) };
+                    let info = ipswatch::detect::is_informational(&e.signature, &detect_cfg);
+                    let ignored = e.sid.is_some_and(|s| detect_cfg.ignore_sids.contains(&s));
+                    let c = |t: String| {
+                        if info || ignored {
+                            RichText::new(t).weak()
+                        } else if e.was_dropped() {
+                            RichText::new(t)
+                        } else {
+                            RichText::new(t).color(red)
+                        }
+                    };
+                    let kind = if ignored {
+                        "ignored".to_string()
+                    } else if info {
+                        "informational".to_string()
+                    } else if !e.category.is_empty() {
+                        e.category.clone()
+                    } else {
+                        match ipswatch::detect::implied_severity(&e.signature) {
+                            1 => "attack / malware".into(),
+                            2 => "scan / suspicious".into(),
+                            _ => "other".into(),
+                        }
+                    };
                     let hp = |ip: &str, p: Option<i64>| p.map(|p| format!("{ip}:{p}")).unwrap_or_else(|| ip.to_string());
                     let cells = [
                         ipswatch::local_time(&e.ts),
@@ -879,8 +1005,8 @@ impl App {
                         e.proto.clone(),
                         e.sid.map(|s| s.to_string()).unwrap_or_default(),
                         e.signature.clone(),
-                        e.category.clone(),
-                        e.severity.to_string(),
+                        kind,
+                        ipswatch::detect::effective_severity(e).to_string(),
                         e.action.clone(),
                     ];
                     for t in cells {
@@ -888,8 +1014,27 @@ impl App {
                             ui.label(c(t));
                         });
                     }
+                    row.response().context_menu(|ui| {
+                        if let Some(sid) = e.sid {
+                            if !ignored && ui.button(format!("Ignore signature {sid}")).clicked() {
+                                ignore = Some((sid, e.signature.clone()));
+                                ui.close_menu();
+                            }
+                        }
+                        if ui.button("Copy source IP").clicked() {
+                            ui.ctx().copy_text(e.src_ip.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Look up source on AbuseIPDB").clicked() {
+                            let _ = open::that(format!("https://www.abuseipdb.com/check/{}", e.src_ip));
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
+        if let Some((sid, name)) = ignore {
+            self.ignore_sid(sid, &name);
+        }
     }
 
     fn log_view(&mut self, ui: &mut Ui) {
@@ -967,6 +1112,10 @@ impl eframe::App for App {
         while let Ok(m) = self.bg_rx.try_recv() {
             match m {
                 Bg::Message { title, text, error } => self.message = Some((title, text, error)),
+                Bg::Rescored { text } => {
+                    self.rescoring = false;
+                    self.message = Some(("Re-score complete".into(), text, false));
+                }
                 Bg::Cert { text, error, suggest_url } => {
                     let title = if error { "Certificate: action needed" } else { "Certificate OK" };
                     self.message = Some((title.into(), text, error));
