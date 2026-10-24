@@ -44,6 +44,18 @@ pub struct Exposed {
     pub note: String,
 }
 
+impl Exposed {
+    /// Short status for tables.
+    pub fn status_label(&self) -> String {
+        match (self.blocked, self.source.as_str()) {
+            (true, "port forward") => "forwarded, no pass rule".into(),
+            (true, _) => "not reachable".into(),
+            (false, _) if self.hits > 0 => format!("OPEN · {} hits", self.hits),
+            (false, _) => "OPEN".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Device {
     pub mac: String,
@@ -377,15 +389,27 @@ fn check_exposure(cfg: &Config, api: &OPNsense, nets: &Nets, wan_ifaces: &BTreeS
         }
         let already = snap.exposure.iter().any(|e| e.target == s(r, "destination_net") && e.port == s(r, "destination_port"));
         if !already {
+            // A pass rule to a LAN address does nothing from the internet without a port forward
+            // (no NAT translation reaches it) - typically a leftover rule.
+            let dst = s(r, "destination_net");
+            let lan_target = dst.parse::<std::net::IpAddr>().is_ok_and(|ip| nets.is_internal(&dst) && !nets.is_own(&dst) && match ip {
+                std::net::IpAddr::V4(a) => a.is_private(),
+                std::net::IpAddr::V6(_) => false,
+            });
             snap.exposure.push(Exposed {
                 source: "WAN pass rule".into(),
                 interface: s(r, "%interface"),
-                target: { let d = s(r, "destination_net"); if d.is_empty() { "any".into() } else { d } },
+                target: if dst.is_empty() { "any".into() } else { dst.clone() },
                 port: { let p = s(r, "destination_port"); if p.is_empty() { "any".into() } else { p } },
                 protocol: s(r, "protocol"),
-                blocked: false,
+                blocked: lan_target,
                 hits: 0,
-                note: s(r, "description"),
+                note: if lan_target {
+                    [s(r, "description"), "no port forward to it, so not reachable from the internet (leftover rule?)".into()]
+                        .into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ")
+                } else {
+                    s(r, "description")
+                },
             });
         }
     }
@@ -587,18 +611,26 @@ pub fn run(cfg: &Config, store: &Store, api: &OPNsense) -> Result<(Snapshot, Vec
     check!("gateways", check_gateways(cfg, api, &mut snap, &mut problems));
     check!("services", check_services(cfg, api, &mut snap, &mut problems));
     check!("system", check_system(cfg, store, api, &mut snap, &mut problems));
+    let mut resolvable: Vec<&str> = vec!["health:"];
     if cfg.health.exposure_audit {
-        check!("exposure", check_exposure(cfg, api, &nets, &wan, &mut snap, &mut problems));
+        match check_exposure(cfg, api, &nets, &wan, &mut snap, &mut problems) {
+            Ok(()) => resolvable.push("exposure:"),
+            Err(e) => {
+                warn!("health check 'exposure' failed: {e:#}");
+                snap.errors.push(format!("exposure: {e:#}"));
+            }
+        }
     }
     check!("devices", check_devices(cfg, store, api, &mut snap, &mut problems));
     check!("config", check_config(cfg, store, api, &mut snap, &mut problems));
 
-    let alerted = sync(cfg, store, &problems, true)?;
+    let alerted = sync(cfg, store, &problems, &resolvable)?;
     Ok((snap, alerted))
 }
 
 /// Upsert findings for current problems; resolve stateful health findings that cleared.
-fn sync(cfg: &Config, store: &Store, problems: &[Problem], resolve_missing: bool) -> Result<Vec<Finding>> {
+/// `resolve_prefixes`: finding keys with these prefixes that no longer appear get resolved.
+fn sync(cfg: &Config, store: &Store, problems: &[Problem], resolve_prefixes: &[&str]) -> Result<Vec<Finding>> {
     let now = crate::now_iso();
     let mut alerted = Vec::new();
     for p in problems {
@@ -625,10 +657,11 @@ fn sync(cfg: &Config, store: &Store, problems: &[Problem], resolve_missing: bool
             alerted.push(f);
         }
     }
-    if resolve_missing {
+    if !resolve_prefixes.is_empty() {
         let active: BTreeSet<&str> = problems.iter().map(|p| p.key.as_str()).collect();
         for f in store.list_findings(None, Severity::Low, usize::MAX)? {
-            if f.key.starts_with("health:") && f.key != "health:unreachable" && !active.contains(f.key.as_str()) && f.status != "resolved" {
+            let resolvable = resolve_prefixes.iter().any(|p| f.key.starts_with(p));
+            if resolvable && f.key != "health:unreachable" && !active.contains(f.key.as_str()) && matches!(f.status.as_str(), "open" | "ack") {
                 store.set_status(&f.key, "resolved")?;
                 info!("Resolved: {}", f.title);
             }
@@ -656,7 +689,7 @@ pub fn heartbeat(cfg: &Config, store: &Store, down_since: Option<chrono::DateTim
                 ],
                 targets: vec![],
             }],
-            false,
+            &[],
         ),
         None => {
             if store.get_finding(key)?.is_some_and(|f| f.status == "open" || f.status == "ack") {

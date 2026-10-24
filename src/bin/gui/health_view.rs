@@ -140,9 +140,9 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
                                 });
                                 r.col(|ui| {
                                     if e.blocked {
-                                        ui.weak("forwarded, no pass rule");
+                                        ui.weak(e.status_label());
                                     } else {
-                                        ui.label(RichText::new(if e.hits > 0 { format!("OPEN · {} hits", e.hits) } else { "OPEN".into() }).color(red));
+                                        ui.label(RichText::new(e.status_label()).color(red));
                                     }
                                 });
                                 r.col(|ui| {

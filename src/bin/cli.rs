@@ -204,7 +204,7 @@ fn main() -> Result<()> {
             println!("Firmware: {}", snap.firmware);
             println!("\nExposure ({}):", snap.exposure.len());
             for e in &snap.exposure {
-                println!("  {:<22} {:<6} {:<9} {:<22} {}{}", format!("{}:{}", e.target, e.port), e.protocol, e.source.split(' ').next().unwrap_or(""), if e.blocked { "forwarded, no pass rule" } else { "OPEN" }, e.note, if e.hits > 0 { format!(" ({} hits)", e.hits) } else { String::new() });
+                println!("  {:<22} {:<6} {:<9} {:<22} {}{}", format!("{}:{}", e.target, e.port), e.protocol, e.source.split(' ').next().unwrap_or(""), e.status_label(), e.note, if e.hits > 0 { format!(" ({} hits)", e.hits) } else { String::new() });
             }
             println!("\nDevices known: {} (new this run: {})", snap.devices.len(), snap.new_devices);
             println!("Recent config changes:");
