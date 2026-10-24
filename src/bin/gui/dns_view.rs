@@ -104,7 +104,11 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
             }
             info.push(if srv.forwarders.is_empty() { "no forwarders (recursive)".into() } else { format!("forwarders: {}", srv.forwarders.join(", ")) });
             if srv.api_ok {
-                info.push(if srv.blocking { format!("blocking on, {} list(s)", srv.blocklist_urls) } else { "blocking OFF".into() });
+                info.push(match (srv.blocking, srv.blocklist_urls) {
+                    (false, _) => "blocking OFF".into(),
+                    (true, 0) => "blocking on, no blocklists".into(),
+                    (true, n) => format!("blocking on, {n} list(s)"),
+                });
             }
             ui.weak(info.join(" · "));
             if !srv.api_error.is_empty() {
@@ -153,6 +157,19 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
                 ui.label(if l.ok { RichText::new(t).color(good(dark)) } else { RichText::new(t).color(sev_color(Severity::High, dark)).strong() });
             }
         });
+
+        if srv.api_ok {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Failed resolutions in the server log, last hour:");
+                ui.label(RichText::new(srv.upstream_failures.to_string()).strong());
+                if !srv.failing_names.is_empty() {
+                    ui.weak(format!("· failing most: {}", ipswatch::dns::pairs_text(&srv.failing_names, 6)));
+                }
+                if !srv.silent_nameservers.is_empty() {
+                    ui.weak(format!("· name servers timing out: {}", ipswatch::dns::pairs_text(&srv.silent_nameservers, 5)));
+                }
+            });
+        }
 
         // Exposure
         if !srv.exposure.is_empty() {

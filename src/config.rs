@@ -474,7 +474,7 @@ impl Default for DnsCfg {
             interval_minutes: 5,
             timeout_seconds: 10,
             test_domains: ["cloudflare.com", "opnsense.org"].map(String::from).to_vec(),
-            servfail_pct: 5.0,
+            servfail_pct: 10.0,
             blocklist_max_age_hours: 48,
             client_queries_per_hour: 3000,
             client_spike_factor: 5.0,

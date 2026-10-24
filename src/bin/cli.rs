@@ -268,6 +268,8 @@ fn main() -> Result<()> {
                 println!("  recursion {} · forwarders {} · blocking {} ({} lists, refreshed {} h ago, next {})",
                     s.recursion, if s.forwarders.is_empty() { "none".into() } else { s.forwarders.join(", ") }, s.blocking, s.blocklist_urls,
                     s.blocklist_age_hours.map(|a| format!("{a:.1}")).unwrap_or("?".into()), ipswatch::local_time(&s.blocklist_next_update));
+                println!("  server log, last hour: {} failed resolutions; failing most: {}; name servers timing out: {}",
+                    s.upstream_failures, ipswatch::dns::pairs_text(&s.failing_names, 6), ipswatch::dns::pairs_text(&s.silent_nameservers, 5));
                 for c in s.top_clients.iter().take(5) {
                     println!("  client {:<16} {:<30} {:>6} queries (usual {})", c.ip, c.name, c.hits, c.usual.map(|u| format!("{u:.0}")).unwrap_or("learning".into()));
                 }
@@ -300,7 +302,12 @@ fn main() -> Result<()> {
         Cmd::DumpDns { server, path, params } => {
             let srv = cfg.dns.servers.iter().find(|s| s.label() == server || s.host() == server).context("no such DNS server in the config")?;
             let q: Vec<(&str, &str)> = params.iter().filter_map(|p| p.split_once('=')).collect();
-            let v = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?.get(&path, &q)?;
+            let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?;
+            if path.starts_with("logs/download") {
+                print!("{}", t.get_text(&path, &q)?);
+                return Ok(());
+            }
+            let v = t.get(&path, &q)?;
             println!("{}", serde_json::to_string_pretty(&ipswatch::dns::sanitize(&v))?)
         }
         Cmd::Rescore => {

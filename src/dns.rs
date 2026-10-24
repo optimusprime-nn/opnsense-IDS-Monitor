@@ -120,7 +120,16 @@ pub struct ServerStatus {
     pub query_logger: String,
     pub nx_clients: Vec<NxClient>,
     pub exposure: Vec<DnsExposure>,
+    /// From the server log, last hour: failed recursive resolutions, by name and by silent name server.
+    pub upstream_failures: u64,
+    pub failing_names: Vec<(String, u64)>,
+    pub silent_nameservers: Vec<(String, u64)>,
     pub errors: Vec<String>,
+}
+
+/// "a (3), b (2)"
+pub fn pairs_text(v: &[(String, u64)], n: usize) -> String {
+    v.iter().take(n).map(|(k, c)| format!("{k} ({c})")).collect::<Vec<_>>().join(", ")
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -167,6 +176,22 @@ impl Technitium {
             Some("invalid-token") => bail!("the API token was rejected (invalid or expired)"),
             Some(other) => bail!("{path}: {other}: {}", s(&v, "errorMessage")),
             None => bail!("{path}: unexpected response"),
+        }
+    }
+}
+
+impl Technitium {
+    /// GET /api/<path> returning plain text (e.g. logs/download).
+    pub fn get_text(&self, path: &str, query: &[(&str, &str)]) -> Result<String> {
+        let url = format!("{}/api/{}", self.base, path.trim_start_matches('/'));
+        let mut r = self.agent.get(&url).query("token", &self.token);
+        for (k, v) in query {
+            r = r.query(k, v);
+        }
+        match r.call() {
+            Ok(resp) => Ok(resp.into_string()?),
+            Err(ureq::Error::Status(code, _)) => bail!("{path}: HTTP {code}"),
+            Err(ureq::Error::Transport(t)) => bail!("{path}: {}", t.to_string().replace(&self.token, "***")),
         }
     }
 }
@@ -310,34 +335,107 @@ pub fn settings_diff(old: &Value, new: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Port -> what Technitium uses it for, from its settings.
-fn port_purposes(set: &Value) -> BTreeMap<u16, String> {
-    let mut m = BTreeMap::new();
-    m.insert(53, "DNS".to_string());
+/// What Technitium uses a port for, from its settings.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Purpose {
+    /// e.g. "DNS-over-UDP-PROXY + DNS-over-TCP-PROXY"
+    name: String,
+    /// Every service on the port is UDP (QUIC, UDP proxy), so a TCP connect test says nothing.
+    udp_only: bool,
+}
+
+/// Port -> purpose. Several services can share a port (UDP and TCP proxy on 538, DoT and DoQ on 853).
+fn port_purposes(set: &Value) -> BTreeMap<u16, Purpose> {
     let port = |k: &str, def: u64| -> u16 { set.get(k).and_then(Value::as_u64).unwrap_or(def) as u16 };
-    m.insert(port("webServiceHttpPort", 5380), "web console (HTTP)".into());
-    if b(set, "webServiceEnableTls") {
-        m.insert(port("webServiceTlsPort", 53443), "web console (HTTPS)".into());
+    let mut list: Vec<(u16, &str, bool)> = vec![(53, "DNS", false), (port("webServiceHttpPort", 5380), "web console (HTTP)", false)];
+    for (on, k, def, name, udp) in [
+        ("webServiceEnableTls", "webServiceTlsPort", 53443, "web console (HTTPS)", false),
+        ("enableDnsOverTls", "dnsOverTlsPort", 853, "DNS-over-TLS", false),
+        ("enableDnsOverHttps", "dnsOverHttpsPort", 443, "DNS-over-HTTPS", false),
+        ("enableDnsOverHttp", "dnsOverHttpPort", 80, "DNS-over-HTTP", false),
+        ("enableDnsOverUdpProxy", "dnsOverUdpProxyPort", 538, "DNS-over-UDP-PROXY", true),
+        ("enableDnsOverTcpProxy", "dnsOverTcpProxyPort", 538, "DNS-over-TCP-PROXY", false),
+        ("enableDnsOverQuic", "dnsOverQuicPort", 853, "DNS-over-QUIC", true),
+    ] {
+        if b(set, on) {
+            list.push((port(k, def), name, udp));
+        }
     }
-    if b(set, "enableDnsOverTls") {
-        m.insert(port("dnsOverTlsPort", 853), "DNS-over-TLS".into());
-    }
-    if b(set, "enableDnsOverHttps") {
-        m.insert(port("dnsOverHttpsPort", 443), "DNS-over-HTTPS".into());
-    }
-    if b(set, "enableDnsOverHttp") {
-        m.insert(port("dnsOverHttpPort", 80), "DNS-over-HTTP".into());
-    }
-    if b(set, "enableDnsOverUdpProxy") {
-        m.insert(port("dnsOverUdpProxyPort", 538), "DNS-over-UDP-PROXY".into());
-    }
-    if b(set, "enableDnsOverTcpProxy") {
-        m.insert(port("dnsOverTcpProxyPort", 538), "DNS-over-TCP-PROXY".into());
-    }
-    if b(set, "enableDnsOverQuic") {
-        m.insert(port("dnsOverQuicPort", 853), "DNS-over-QUIC (UDP)".into());
+    let mut m: BTreeMap<u16, Purpose> = BTreeMap::new();
+    for (p, name, udp) in list {
+        match m.get_mut(&p) {
+            Some(x) => {
+                x.name = format!("{} + {name}", x.name);
+                x.udp_only &= udp;
+            }
+            None => {
+                m.insert(p, Purpose { name: name.into(), udp_only: udp });
+            }
+        }
     }
     m
+}
+
+/// Recursion allowed from anywhere (an open resolver if reachable from the internet).
+fn recursion_open(set: &Value) -> bool {
+    match s(set, "recursion").as_str() {
+        "Allow" => true,
+        "UseSpecifiedNetworkACL" => arr(set, "recursionNetworkACL")
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|a| matches!(a.trim(), "0.0.0.0/0" | "::/0" | "0.0.0.0" | "::")),
+        _ => false,
+    }
+}
+
+/// Failed resolutions in the last hour, from today's server log.
+fn check_upstream_log(api: &Technitium, st: &mut ServerStatus) {
+    let r = (|| -> Result<String> {
+        let files = api.get("logs/list", &[])?;
+        let Some(name) = arr(&files, "logFiles").first().map(|f| s(f, "fileName")) else { return Ok(String::new()) };
+        api.get_text("logs/download", &[("fileName", &name)])
+    })();
+    match r {
+        Ok(text) => {
+            let (n, names, ns) = parse_failures(&text, chrono::Utc::now() - chrono::Duration::hours(1));
+            st.upstream_failures = n;
+            st.failing_names = names;
+            st.silent_nameservers = ns;
+        }
+        Err(e) => st.errors.push(format!("server log: {e:#}")),
+    }
+}
+
+fn top(m: HashMap<String, u64>, n: usize) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = m.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    v.truncate(n);
+    v
+}
+
+/// Log entries start "[2026-10-24 19:32:46 UTC] DNS Server failed to resolve the request 'x.com. A IN'."
+/// and are followed by exception lines naming the name servers that timed out.
+pub fn parse_failures(text: &str, since: chrono::DateTime<chrono::Utc>) -> (u64, Vec<(String, u64)>, Vec<(String, u64)>) {
+    let mut recent = false;
+    let (mut total, mut names, mut servers) = (0u64, HashMap::new(), HashMap::new());
+    for line in text.lines() {
+        if let Some((ts, msg)) = line.strip_prefix('[').and_then(|r| r.split_once("] ")) {
+            if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts.trim_end_matches(" UTC"), "%Y-%m-%d %H:%M:%S") {
+                recent = t.and_utc() >= since;
+                if let Some(q) = msg.strip_prefix("DNS Server failed to resolve the request '").filter(|_| recent) {
+                    total += 1;
+                    let name = q.split_whitespace().next().unwrap_or("").trim_end_matches('.').to_lowercase();
+                    *names.entry(name).or_insert(0) += 1;
+                }
+                continue;
+            }
+        }
+        if let Some((_, rest)) = line.split_once("request timed out for name server [").filter(|_| recent) {
+            let ns = rest.split(" (").next().unwrap_or("").trim_end_matches(']').to_string();
+            *servers.entry(ns).or_insert(0) += 1;
+        }
+    }
+    (total, top(names, 10), top(servers, 10))
 }
 
 fn first_port(p: &str) -> Option<u16> {
@@ -417,12 +515,14 @@ fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exp
     }
     st.blocking = b(&set, "enableBlocking");
     st.blocklist_urls = arr(&set, "blockListUrls").len();
-    st.blocklist_interval_hours = u(&set, "blockListUrlUpdateIntervalHours");
+    st.blocklist_interval_hours = u(&set, "blockListUpdateIntervalHours").max(u(&set, "blockListUrlUpdateIntervalHours"));
     st.blocklist_next_update = s(&set, "blockListNextUpdatedOn");
     if st.blocklist_interval_hours > 0 && !st.blocklist_next_update.is_empty() {
         // Last refresh = next scheduled refresh minus the interval.
         st.blocklist_age_hours = hours_since(&st.blocklist_next_update).map(|h| h + st.blocklist_interval_hours as f64);
     }
+
+    check_upstream_log(&api, st);
 
     // Traffic (last hour).
     match api.get("dashboard/stats/get", &[("type", "LastHour"), ("utc", "true")]) {
@@ -451,10 +551,17 @@ fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exp
                     kind: "dns",
                     severity: Severity::Medium,
                     title: format!("DNS {label}: {:.1}% of queries failing upstream", stats.pct(stats.servfail)),
-                    reasons: vec![
-                        format!("{} of {} queries in the last hour answered SERVFAIL (limit {}%)", stats.servfail, stats.total, d.servfail_pct),
-                        if st.forwarders.is_empty() { "recursive resolution (no forwarders)".into() } else { format!("forwarders: {}", st.forwarders.join(", ")) },
-                    ],
+                    reasons: [
+                        Some(format!("{} of {} queries in the last hour answered SERVFAIL (limit {}%)", stats.servfail, stats.total, d.servfail_pct)),
+                        Some(if st.forwarders.is_empty() { "recursive resolution (no forwarders)".into() } else { format!("forwarders: {}", st.forwarders.join(", ")) }),
+                        (st.upstream_failures > 0).then(|| format!("server log: {} failed resolutions in the last hour", st.upstream_failures)),
+                        (!st.failing_names.is_empty()).then(|| format!("failing most: {}", pairs_text(&st.failing_names, 6))),
+                        (!st.silent_nameservers.is_empty()).then(|| format!("name servers timing out: {}", pairs_text(&st.silent_nameservers, 5))),
+                        Some("timeouts to many unrelated name servers point at the internet link (WAN, firewall states); a few names failing over and over is usually those domains' own problem".into()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
                     targets: vec![host.clone()],
                 });
             }
@@ -730,11 +837,12 @@ fn check_changes(cfg: &Config, store: &Store, api: &Technitium, set: &Value, st:
 
 fn check_exposure(set: &Value, host: &str, label: &str, exposure: &[Exposed], timeout: Duration, st: &mut ServerStatus, out: &mut Vec<Problem>) {
     let purposes = port_purposes(set);
-    let open_resolver = st.recursion == "Allow";
+    let open_resolver = recursion_open(set);
     for e in exposure.iter().filter(|e| e.target == host && e.source == "port forward") {
         let port = first_port(&e.port);
-        let purpose = port.and_then(|p| purposes.get(&p).cloned()).unwrap_or_default();
-        let tcp = e.protocol.to_lowercase().contains("tcp") || e.protocol.is_empty() || e.protocol.eq_ignore_ascii_case("any");
+        let pp = port.and_then(|p| purposes.get(&p).cloned()).unwrap_or_default();
+        let purpose = pp.name.clone();
+        let tcp = !pp.udp_only && e.protocol.to_lowercase().contains("tcp") || e.protocol.is_empty() || e.protocol.eq_ignore_ascii_case("any");
         let listening = port.filter(|_| tcp).map(|p| tcp_open(host, p, timeout));
         let mut x = DnsExposure {
             port: e.port.clone(),
@@ -935,11 +1043,33 @@ mod tests {
     }
 
     #[test]
+    fn log_failures() {
+        let log = [
+            "[2026-10-24 19:32:46 UTC] DNS Server failed to resolve the request 'edge.nc0.co. A IN'.",
+            " ---> y: request timed out for name server [ns-1781.awsdns-30.co.uk (205.251.198.245)].",
+            "[2026-10-24 19:33:00 UTC] DNS Server successfully refreshed 'a' Secondary zone",
+            "[2026-10-24 10:00:00 UTC] DNS Server failed to resolve the request 'old.com. A IN'.",
+            " ---> y: request timed out for name server [old (1.1.1.1)].",
+        ]
+        .join("\n");
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-24T19:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let (n, names, ns) = parse_failures(&log, since);
+        assert_eq!(n, 1);
+        assert_eq!(names, vec![("edge.nc0.co".to_string(), 1)]);
+        assert_eq!(ns, vec![("ns-1781.awsdns-30.co.uk".to_string(), 1)]);
+    }
+
+    #[test]
     fn ports() {
-        let p = port_purposes(&json!({"webServiceHttpPort": 5380, "enableDnsOverTls": true, "dnsOverTlsPort": 853}));
-        assert_eq!(p.get(&5380).map(String::as_str), Some("web console (HTTP)"));
-        assert_eq!(p.get(&853).map(String::as_str), Some("DNS-over-TLS"));
-        assert!(!p.contains_key(&538));
+        let p = port_purposes(&json!({"webServiceHttpPort": 5380, "enableDnsOverTls": true, "dnsOverTlsPort": 853, "enableDnsOverQuic": true,
+            "enableDnsOverUdpProxy": true, "enableDnsOverTcpProxy": true}));
+        assert_eq!(p[&5380].name, "web console (HTTP)");
+        assert_eq!(p[&853].name, "DNS-over-TLS + DNS-over-QUIC");
+        assert!(!p[&853].udp_only);
+        assert_eq!(p[&538].name, "DNS-over-UDP-PROXY + DNS-over-TCP-PROXY");
+        assert!(port_purposes(&json!({"enableDnsOverQuic": true}))[&853].udp_only);
+        assert!(recursion_open(&json!({"recursion": "UseSpecifiedNetworkACL", "recursionNetworkACL": ["0.0.0.0/0"]})));
+        assert!(!recursion_open(&json!({"recursion": "UseSpecifiedNetworkACL", "recursionNetworkACL": ["192.168.1.0/24"]})));
         assert_eq!(first_port("538"), Some(538));
         assert_eq!(first_port("53:54"), None);
     }
