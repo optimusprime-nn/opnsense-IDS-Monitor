@@ -255,7 +255,10 @@ fn main() -> Result<()> {
             } else {
                 ipswatch::health::run(&cfg, &store, &api()?)?.0.exposure
             };
-            let (snap, _) = ipswatch::dns::run(&cfg, &store, &exposure)?;
+            let (snap, _) = ipswatch::dns::run(&cfg, &store, &exposure, &ipswatch::monitor::recent_ids_restarts(&cfg))?;
+            for r in &snap.ids_restarts {
+                println!("{r}");
+            }
             for s in &snap.servers {
                 println!("{} ({}) - DNS {} - API {}", s.name, s.host, if s.dns_ok { "UP" } else { "DOWN" }, if s.api_ok { format!("OK, Technitium {}", s.version) } else { s.api_error.clone() });
                 for l in &s.lookups {

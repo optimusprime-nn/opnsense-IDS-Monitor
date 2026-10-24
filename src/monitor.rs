@@ -63,10 +63,21 @@ impl Shared {
     }
 }
 
+/// Suricata restarts in the last hour, if the firewall is configured (empty on any error).
+pub fn recent_ids_restarts(cfg: &Config) -> Vec<String> {
+    if cfg.opnsense.url.trim().is_empty() {
+        return vec![];
+    }
+    OPNsense::new(&cfg.opnsense).and_then(|api| crate::dns::ids_restarts(&api, 1)).unwrap_or_else(|e| {
+        log::warn!("reading Suricata restarts: {e:#}");
+        vec![]
+    })
+}
+
 /// Run the DNS checks once, store the snapshot and alert. Uses the latest exposure audit.
 pub fn run_dns(shared: &Shared, cfg: &Config) -> Option<String> {
     let exposure = shared.health.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.exposure.clone()).unwrap_or_default();
-    match crate::dns::run(cfg, &shared.store, &exposure) {
+    match crate::dns::run(cfg, &shared.store, &exposure, &recent_ids_restarts(cfg)) {
         Ok((snap, alerts)) => {
             *shared.dns.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
             for f in &alerts {

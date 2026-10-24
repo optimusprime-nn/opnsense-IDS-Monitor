@@ -136,6 +136,8 @@ pub fn pairs_text(v: &[(String, u64)], n: usize) -> String {
 pub struct Snapshot {
     pub at: String,
     pub servers: Vec<ServerStatus>,
+    /// Suricata restarts in the last hour (inline IPS stalls the WAN meanwhile).
+    pub ids_restarts: Vec<String>,
 }
 
 // ---------------------------------------------------------------- Technitium API
@@ -956,9 +958,32 @@ pub fn test(cfg: &Config) -> (String, bool) {
 "), err)
 }
 
-/// Check every configured server; `exposure` is the firewall's latest exposure audit (may be empty).
-pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed]) -> Result<(Snapshot, Vec<Finding>)> {
-    let mut snap = Snapshot { at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(), servers: vec![] };
+/// Suricata stop / start pairs in the firewall log within the last `hours`, e.g.
+/// "Suricata restarted 10:10:08 - 10:14:36 (4.5 min)". In inline (Netmap) mode the WAN stalls meanwhile.
+pub fn ids_restarts(api: &crate::opnsense::OPNsense, hours: i64) -> Result<Vec<String>> {
+    let since = chrono::Utc::now() - chrono::Duration::hours(hours);
+    let times = |phrase: &str| -> Result<Vec<chrono::DateTime<chrono::Utc>>> {
+        let v = api.post_raw("diagnostics/log/core/suricata", serde_json::json!({"current": 1, "rowCount": 50, "searchPhrase": phrase}))?;
+        let mut t: Vec<_> = arr(&v, "rows").iter().filter_map(|r| crate::parse_iso(&s(r, "timestamp"))).filter(|t| *t >= since).collect();
+        t.sort();
+        Ok(t)
+    };
+    let stops = times("Stopping engine")?;
+    let starts = times("Engine started")?;
+    let local = |t: &chrono::DateTime<chrono::Utc>| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+    Ok(stops
+        .iter()
+        .map(|stop| match starts.iter().find(|st| *st >= stop) {
+            Some(st) => format!("Suricata restarted {} - {} ({:.1} min)", local(stop), local(st), (*st - *stop).num_seconds() as f64 / 60.0),
+            None => format!("Suricata stopped at {} and hasn't logged a restart", local(stop)),
+        })
+        .collect())
+}
+
+/// Check every configured server. `exposure` is the firewall's latest exposure audit and `ids_restarts`
+/// Suricata's recent restarts (both may be empty).
+pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed], ids_restarts: &[String]) -> Result<(Snapshot, Vec<Finding>)> {
+    let mut snap = Snapshot { at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(), servers: vec![], ids_restarts: ids_restarts.to_vec() };
     let mut problems = Vec::new();
     let servers: Vec<&DnsServerCfg> = cfg.dns.servers.iter().filter(|s| !s.url.trim().is_empty()).collect();
     std::thread::scope(|sc| {
@@ -1014,6 +1039,13 @@ pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed]) -> Result<(Snapsho
             reasons: down.iter().map(|s| format!("{} ({}): {}", s.name, s.host, s.lookups.first().map(|l| l.result.as_str()).unwrap_or("?"))).collect(),
             targets: down.iter().map(|s| s.host.clone()).collect(),
         });
+    }
+
+    // Upstream trouble during an inline-IPS restart has a known cause; say so.
+    if !ids_restarts.is_empty() {
+        for p in problems.iter_mut().filter(|p| p.key.ends_with(":servfail") || p.key.ends_with(":lookup") || p.key == "dns:health:all:down") {
+            p.reasons.insert(1, format!("{} - with inline IPS the WAN stalls while Suricata reloads, so this is expected and clears within the hour", ids_restarts.join("; ")));
+        }
     }
 
     let alerted = crate::health::sync(cfg, store, &problems, &["dns:health:"])?;

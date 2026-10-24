@@ -64,6 +64,9 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
         };
     });
     let Some(s) = snap else { return action };
+    for r in &s.ids_restarts {
+        ui.label(RichText::new(format!("{r} - the WAN stalls while inline IPS reloads, so upstream lookups fail meanwhile")).color(ui.visuals().warn_fg_color));
+    }
     ui.add_space(6.0);
 
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
