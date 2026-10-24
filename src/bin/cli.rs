@@ -72,6 +72,8 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Run the firewall health, exposure, device and config checks once and print the result
+    Health,
     /// Recompute all findings from stored events with the current rules (keeps your ack/false-positive marks)
     Rescore,
     /// Print raw alert rows from the firewall API (diagnostics)
@@ -148,6 +150,7 @@ fn main() -> Result<()> {
                 store,
                 status: Mutex::new(Status::default()),
                 data_version: AtomicU64::new(0),
+                health: Mutex::new(None),
                 on_alert: Box::new(|_, _| {}),
                 on_cycle: Box::new(|| {}),
             });
@@ -181,6 +184,42 @@ fn main() -> Result<()> {
                 } else {
                     println!("\nDRY RUN - nothing was changed. Apply with: ipswatch-cli ips-policy --apply --yes");
                 }
+            }
+        }
+        Cmd::Health => {
+            let (snap, _) = ipswatch::health::run(&cfg, &store, &api()?)?;
+            println!("{} - {}  up {}  load {}", snap.hostname, snap.version, snap.uptime, snap.loadavg);
+            println!("\nGateways:");
+            for g in &snap.gateways {
+                println!("  {:<22} {:<10} delay {:>7}  loss {:>5}", g.name, g.status, g.delay_ms.map(|d| format!("{d:.1} ms")).unwrap_or_default(), g.loss_pct.map(|l| format!("{l:.0}%")).unwrap_or_default());
+            }
+            let stopped: Vec<_> = snap.services.iter().filter(|s| !s.running).map(|s| s.name.as_str()).collect();
+            println!("\nServices: {} running, stopped: {}", snap.services.len() - stopped.len(), if stopped.is_empty() { "none".into() } else { stopped.join(", ") });
+            println!("Memory {}%  States {}  Disks {}", snap.memory_pct.map(|m| m.to_string()).unwrap_or("?".into()),
+                snap.states.map(|(c, l)| format!("{c}/{l}")).unwrap_or("?".into()),
+                snap.disks.iter().map(|(m, p)| format!("{m} {p}%")).collect::<Vec<_>>().join(", "));
+            for w in &snap.system_warnings {
+                println!("Warning: {} [{}] {}", w.0, w.1, w.2);
+            }
+            println!("Firmware: {}", snap.firmware);
+            println!("\nExposure ({}):", snap.exposure.len());
+            for e in &snap.exposure {
+                println!("  {:<22} {:<6} {:<9} {:<22} {}{}", format!("{}:{}", e.target, e.port), e.protocol, e.source.split(' ').next().unwrap_or(""), if e.blocked { "forwarded, no pass rule" } else { "OPEN" }, e.note, if e.hits > 0 { format!(" ({} hits)", e.hits) } else { String::new() });
+            }
+            println!("\nDevices known: {} (new this run: {})", snap.devices.len(), snap.new_devices);
+            println!("Recent config changes:");
+            for c in snap.config_changes.iter().take(5) {
+                println!("  {}  {}  {}", ipswatch::local_time(&c.time), c.user, c.description);
+            }
+            for e in &snap.errors {
+                println!("Check failed: {e}");
+            }
+            println!();
+            let open = store.list_findings(Some("open"), Severity::Low, 100)?;
+            let mine: Vec<_> = open.iter().filter(|f| matches!(f.kind.as_str(), "health" | "exposure" | "device" | "config")).collect();
+            println!("Open health/exposure/device/config findings: {}", mine.len());
+            for f in mine {
+                println!("  {:<8} {}", f.severity.as_str().to_uppercase(), f.title);
             }
         }
         Cmd::Rescore => {

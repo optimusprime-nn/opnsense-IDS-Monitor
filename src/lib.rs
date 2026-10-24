@@ -5,6 +5,7 @@ pub mod collect;
 pub mod config;
 pub mod detect;
 pub mod engine;
+pub mod health;
 pub mod icon;
 pub mod ipspolicy;
 pub mod logbuf;

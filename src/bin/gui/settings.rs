@@ -11,18 +11,20 @@ pub enum Section {
     Rules,
     Notifications,
     AutoBlock,
+    Health,
     Application,
     Data,
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Firewall,
         Section::Collection,
         Section::Detection,
         Section::Rules,
         Section::Notifications,
         Section::AutoBlock,
+        Section::Health,
         Section::Application,
         Section::Data,
     ];
@@ -34,6 +36,7 @@ impl Section {
             Section::Rules => "Signature rules",
             Section::Notifications => "Notifications",
             Section::AutoBlock => "Auto-block",
+            Section::Health => "Health checks",
             Section::Application => "Application",
             Section::Data => "Data & storage",
         }
@@ -67,6 +70,7 @@ struct Lists {
     informational: String,
     fw_ignore_ports: String,
     policy_rulesets: String,
+    ignore_services: String,
     smtp_to: String,
     never_block: String,
 }
@@ -122,6 +126,7 @@ impl SettingsForm {
             informational: join(&d.informational_prefixes),
             fw_ignore_ports: join(&cfg.firewall.correlate_ignore_ports),
             policy_rulesets: join(&cfg.ips_policy.rulesets),
+            ignore_services: join(&cfg.health.ignore_services),
         };
         self.error = None;
     }
@@ -158,6 +163,7 @@ impl SettingsForm {
             }
             Section::Notifications => c.notify = def.notify,
             Section::AutoBlock => c.block = def.block,
+            Section::Health => c.health = def.health,
             Section::Application => c.gui = def.gui,
             Section::Data => {
                 c.db_path = def.db_path;
@@ -182,6 +188,7 @@ impl SettingsForm {
         c.detect.ignore_sids = nums(&l.ignore_sids, "").unwrap_or(c.detect.ignore_sids);
         c.detect.informational_prefixes = split(&l.informational, false);
         c.ips_policy.rulesets = split(&l.policy_rulesets, true);
+        c.health.ignore_services = split(&l.ignore_services, true);
         c.firewall.correlate_ignore_ports = nums(&l.fw_ignore_ports, "").unwrap_or(c.firewall.correlate_ignore_ports);
         c
     }
@@ -246,6 +253,7 @@ impl SettingsForm {
                     Section::Rules => self.rules(ui),
                     Section::Notifications => self.notifications(ui, actions),
                     Section::AutoBlock => self.autoblock(ui),
+                    Section::Health => self.health(ui),
                     Section::Application => self.application(ui, actions),
                     Section::Data => self.data(ui, db_path, actions),
                 }
@@ -436,6 +444,44 @@ impl SettingsForm {
         });
         ui.add_space(6.0);
         ui.weak("Internal, private and reserved addresses are never blocked. Manual Block/Unblock on the Findings page uses the same alias.");
+    }
+
+    fn health(&mut self, ui: &mut Ui) {
+        let h = &mut self.draft.health;
+        ui.label("Checks the firewall itself every few minutes while monitoring runs. Problems appear as findings \
+                  (and alerts) and clear themselves when they're fixed.");
+        ui.add_space(8.0);
+        grid(ui, "health", |ui| {
+            row(ui, "Enable health checks", "", |ui| {
+                ui.checkbox(&mut h.enabled, "");
+            });
+            row(ui, "Check every (minutes)", "", |ui| num(ui, &mut h.interval_minutes, 1..=120));
+            row(ui, "Gateway packet loss alert (%)", "", |ui| {
+                ui.add(DragValue::new(&mut h.gateway_loss_pct).range(1.0..=100.0).speed(1.0));
+            });
+            row(ui, "Gateway latency alert (ms)", "Starlink is typically 30-80 ms", |ui| {
+                ui.add(DragValue::new(&mut h.gateway_delay_ms).range(20.0..=5000.0).speed(5.0));
+            });
+            row(ui, "Unreachable alert after (minutes)", "When IPS Watch can't reach the firewall API", |ui| num(ui, &mut h.offline_minutes, 1..=1440));
+            row(ui, "Memory alert (%)", "ZFS cache is excluded", |ui| {
+                ui.add(DragValue::new(&mut h.memory_pct).range(50.0..=100.0).speed(1.0));
+            });
+            row(ui, "State table alert (%)", "", |ui| {
+                ui.add(DragValue::new(&mut h.states_pct).range(10.0..=100.0).speed(1.0));
+            });
+            row(ui, "Disk alert (%)", "", |ui| num(ui, &mut h.disk_pct, 50..=100));
+            row(ui, "Services allowed to be stopped", "Service names, one per line (e.g. eastpect)", |ui| multi(ui, &mut self.lists.ignore_services, 3));
+            row(ui, "Exposure audit", "Port forwards, WAN pass rules and inbound passes", |ui| {
+                ui.checkbox(&mut h.exposure_audit, "");
+            });
+            row(ui, "New device alerts", "From the ARP table", |ui| {
+                ui.checkbox(&mut h.device_alerts, "");
+            });
+            row(ui, "Device learning period (hours)", "After the first scan, devices are recorded quietly for this long", |ui| num(ui, &mut h.device_learning_hours, 0..=720));
+            row(ui, "Config change alerts", "From the firewall's configuration history", |ui| {
+                ui.checkbox(&mut h.config_alerts, "");
+            });
+        });
     }
 
     fn application(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {

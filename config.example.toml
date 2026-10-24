@@ -154,6 +154,21 @@ rulesets = [
     "snort_vrt.indicator-compromise",
 ]
 
+[health]
+enabled = true
+interval_minutes = 5
+gateway_loss_pct = 10.0
+gateway_delay_ms = 500.0
+ignore_services = []
+memory_pct = 90.0
+states_pct = 80.0
+disk_pct = 85
+offline_minutes = 5
+exposure_audit = true
+device_alerts = true
+device_learning_hours = 24
+config_alerts = true
+
 [gui]
 theme = "dark"
 autostart_monitor = true

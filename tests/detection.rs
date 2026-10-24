@@ -270,3 +270,62 @@ fn attacks_on_the_firewall_itself_are_not_access_to_internal_hosts() {
     // A single background scan of the WAN isn't a finding at all.
     assert!(detect::analyze(&evs("ET SCAN Zmap User-Agent (Inbound)", 443, 1), &cfg.detect, &nets, None).is_empty());
 }
+
+fn health_finding(key: &str, kind: &str) -> ipswatch::store::Finding {
+    let mut f = ipswatch::notify::sample_finding();
+    f.key = key.into();
+    f.kind = kind.into();
+    f
+}
+
+#[test]
+fn acknowledged_exposure_stays_acknowledged_but_resolved_health_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("h.db")).unwrap();
+    // Exposure: ack sticks even when seen again later.
+    let mut e = health_finding("exposure:192.168.1.60:443", "exposure");
+    store.upsert_finding(&e).unwrap();
+    store.set_status(&e.key, "ack").unwrap();
+    e.last_seen = "2099-01-01T00:00:00.000000+00:00".into();
+    assert_eq!(store.upsert_finding(&e).unwrap().status, "ack");
+    // Health: resolved -> comes back -> open again, and re-notifies.
+    let h = health_finding("health:gateway:STARLINK", "health");
+    store.upsert_finding(&h).unwrap();
+    store.set_notified(&h.key, &ipswatch::now_iso(), Severity::Low).unwrap();
+    store.set_status(&h.key, "resolved").unwrap();
+    let again = store.upsert_finding(&h).unwrap();
+    assert_eq!(again.status, "open");
+    assert!(again.notified_at.is_none());
+    // IPS findings still reopen from ack on new activity.
+    let mut i = health_finding("inbound:203.0.113.1", "inbound");
+    store.upsert_finding(&i).unwrap();
+    store.set_status(&i.key, "ack").unwrap();
+    i.last_seen = "2099-01-01T00:00:00.000000+00:00".into();
+    assert_eq!(store.upsert_finding(&i).unwrap().status, "open");
+    // Re-scoring IPS data never wipes health/exposure findings.
+    store.delete_findings().unwrap();
+    assert!(store.get_finding("exposure:192.168.1.60:443").unwrap().is_some());
+    assert!(store.get_finding("inbound:203.0.113.1").unwrap().is_none());
+}
+
+#[test]
+fn device_tracking_reports_only_new_macs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("d.db")).unwrap();
+    let d = ipswatch::health::Device {
+        mac: "1c:3b:f3:a6:c7:4c".into(),
+        ip: "192.168.1.42".into(),
+        hostname: "".into(),
+        vendor: "TP-LINK".into(),
+        interface: "LAN".into(),
+        first_seen: ipswatch::now_iso(),
+        last_seen: ipswatch::now_iso(),
+    };
+    assert!(store.upsert_device(&d).unwrap(), "first sighting is new");
+    let mut d2 = d.clone();
+    d2.ip = "192.168.1.43".into();
+    assert!(!store.upsert_device(&d2).unwrap(), "same MAC again is not new");
+    let list = store.list_devices(10).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].ip, "192.168.1.43");
+}

@@ -58,6 +58,29 @@ Building needs the Rust toolchain (`rustup`, MSVC target). Settings, the databas
 
 ![Settings](docs/settings.png)
 
+## Firewall health, exposure, devices and config changes
+
+While monitoring runs, IPS Watch also checks the firewall itself every 5 minutes (adjust this in
+*Settings → Health checks*). The **Health** page shows the results. Problems become findings like IPS ones,
+with alerts, toasts and the red tray icon, and health problems clear themselves when fixed.
+
+| Check | Raises |
+|---|---|
+| Gateways (latency / loss per WAN) | gateway down (HIGH), degraded (MEDIUM), all down (CRITICAL) |
+| Services | any stopped service (HIGH), unless listed as allowed to be stopped |
+| System status, reboots, firmware | crash reporter / system warnings, "firewall rebooted", update available |
+| Memory (ZFS cache excluded), state table, disk | above the configured % |
+| Reachability | IPS Watch can't reach the firewall API for N minutes (HIGH) |
+| **Exposure audit** | each port forward / any-source WAN pass rule / inbound pass seen in the log that's actually open: DNS or sensitive ports HIGH, others LOW (acknowledge the intended ones, and the acknowledgement sticks) |
+| **New devices** | a MAC address not seen before in the ARP table (names from DHCP leases); quiet for 24 h after the first scan while it learns |
+| **Config changes** | each change in the firewall's configuration history, with who and what (MEDIUM if not made by IPS Watch) |
+
+Findings can be filtered by kind (IPS / Health / Exposure / New devices / Config changes) and include
+*Resolved*. CLI: `ipswatch-cli health` runs every check once and prints a summary.
+
+The API user needs read access to these pages: Gateways, Services, Diagnostics (system, ARP, firewall log),
+Firewall rules / NAT, DHCP leases and Configuration history.
+
 ## What gets flagged
 
 Events are grouped per actor inside a sliding window (default 15 min) and scored. A finding is raised

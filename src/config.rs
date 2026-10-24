@@ -337,6 +337,48 @@ impl Default for GuiCfg {
     }
 }
 
+/// Firewall health checks, exposure audit, new devices and config changes.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct HealthCfg {
+    pub enabled: bool,
+    pub interval_minutes: u32,
+    pub gateway_loss_pct: f64,
+    pub gateway_delay_ms: f64,
+    /// Service names (e.g. "eastpect") that may be stopped without an alert.
+    pub ignore_services: Vec<String>,
+    pub memory_pct: f64,
+    pub states_pct: f64,
+    pub disk_pct: u32,
+    /// Alert when the firewall API has been unreachable this long.
+    pub offline_minutes: u32,
+    pub exposure_audit: bool,
+    pub device_alerts: bool,
+    /// After the first device scan, record devices quietly for this long (ARP only shows recently active ones).
+    pub device_learning_hours: u32,
+    pub config_alerts: bool,
+}
+
+impl Default for HealthCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_minutes: 5,
+            gateway_loss_pct: 10.0,
+            gateway_delay_ms: 500.0,
+            ignore_services: vec![],
+            memory_pct: 90.0,
+            states_pct: 80.0,
+            disk_pct: 85,
+            offline_minutes: 5,
+            exposure_audit: true,
+            device_alerts: true,
+            device_learning_hours: 24,
+            config_alerts: true,
+        }
+    }
+}
+
 /// The Drop policy IPS Watch can create on the firewall.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -364,6 +406,7 @@ pub struct Config {
     pub notify: NotifyCfg,
     pub block: BlockCfg,
     pub ips_policy: IpsPolicyCfg,
+    pub health: HealthCfg,
     pub gui: GuiCfg,
 }
 
@@ -380,6 +423,7 @@ impl Default for Config {
             notify: Default::default(),
             block: Default::default(),
             ips_policy: Default::default(),
+            health: Default::default(),
             gui: Default::default(),
         }
     }

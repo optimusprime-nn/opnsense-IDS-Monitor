@@ -258,9 +258,9 @@ pub fn apply(api: &OPNsense, plan: &Plan) -> Result<String> {
     check_saved(&api.post_raw(&path, plan.payload())?, "The policy")?;
     reconfigure(api)?;
     let msg = format!(
-        "{verb} policy \"{POLICY_DESCRIPTION}\": {} rulesets, {} rules now Drop. Suricata reloaded.",
+        "{verb} policy \"{POLICY_DESCRIPTION}\": Alert rules in {} rulesets ({} rules) set to Drop. Suricata reloaded.",
         plan.selected.len(),
-        plan.total_changes()
+        plan.selected.iter().map(|r| r.rules).sum::<u64>()
     );
     log::warn!("{msg}");
     Ok(msg)

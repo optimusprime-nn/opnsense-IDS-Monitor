@@ -64,18 +64,10 @@ pub fn run_detection(
                 maybe_block(cfg, store, api, &mut merged);
             }
         }
-        if do_notify && should_notify(cfg, &merged) {
-            // Remote channels have their own threshold; desktop alerts use gui.alert_min_severity.
-            let delivered = if merged.severity >= cfg.notify.min_severity {
-                notify::send(&merged, &cfg.notify)
-            } else {
-                warn!("FINDING {}: {}", merged.key, merged.title);
-                true
-            };
-            if delivered {
-                store.set_notified(&merged.key, &crate::now_iso(), merged.severity)?;
+        if do_notify {
+            if let Some(f) = notify_if_due(cfg, store, merged)? {
+                alerted.push(f);
             }
-            alerted.push(merged);
         }
     }
     Ok(alerted)
@@ -116,6 +108,25 @@ pub fn refresh_own_addresses(store: &Store, api: &OPNsense, force: bool) {
         }
         Err(e) => warn!("could not read the firewall's interface addresses: {e:#}"),
     }
+}
+
+/// Send a finding to the remote channels if it's due; returns it when it should alert
+/// (the caller decides about desktop toasts).
+pub fn notify_if_due(cfg: &Config, store: &Store, f: Finding) -> Result<Option<Finding>> {
+    if f.status == "false_positive" || !should_notify(cfg, &f) {
+        return Ok(None);
+    }
+    // Remote channels have their own threshold; desktop alerts use gui.alert_min_severity.
+    let delivered = if f.severity >= cfg.notify.min_severity {
+        notify::send(&f, &cfg.notify)
+    } else {
+        warn!("FINDING {}: {}", f.key, f.title);
+        true
+    };
+    if delivered {
+        store.set_notified(&f.key, &crate::now_iso(), f.severity)?;
+    }
+    Ok(Some(f))
 }
 
 fn should_notify(cfg: &Config, f: &Finding) -> bool {

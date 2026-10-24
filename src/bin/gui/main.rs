@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod health_view;
 mod settings;
 mod tray;
 mod win;
@@ -163,6 +164,7 @@ fn main() -> eframe::Result<()> {
                 store,
                 status: Mutex::new(Status::default()),
                 data_version: AtomicU64::new(1),
+                health: Mutex::new(None),
                 on_alert: Box::new(|sh: &Shared, f| {
                     let c = sh.cfg.read().unwrap_or_else(|e| e.into_inner());
                     if c.gui.desktop_alerts && f.severity >= c.gui.alert_min_severity {

@@ -41,6 +41,8 @@ pub struct Shared {
     pub status: Mutex<Status>,
     /// Bumped whenever new data lands, so views know to reload.
     pub data_version: AtomicU64,
+    /// Latest firewall health snapshot (None until the first check).
+    pub health: Mutex<Option<crate::health::Snapshot>>,
     /// Called on the monitor thread for each finding that should alert (desktop toast, repaint...).
     pub on_alert: AlertHook,
     /// Called after every cycle (e.g. to request a GUI repaint).
@@ -100,6 +102,8 @@ impl Monitor {
                 });
                 info!("Monitoring started (poll every {}s)", cfg.poll_seconds);
                 let mut last_prune = Instant::now() - Duration::from_secs(7200);
+                let mut last_health: Option<Instant> = None;
+                let mut down_since: Option<chrono::DateTime<chrono::Utc>> = None;
                 loop {
                     let mut added = 0;
                     let mut err = None;
@@ -114,6 +118,38 @@ impl Monitor {
                     }
                     if let Some(s) = &syslog {
                         added += s.flush(&shared.store).unwrap_or(0);
+                    }
+                    // Heartbeat: is the firewall API reachable?
+                    if api.is_some() {
+                        match &err {
+                            Some(_) => down_since = down_since.or(Some(chrono::Utc::now())),
+                            None => down_since = None,
+                        }
+                        if let Ok(alerts) = crate::health::heartbeat(&cfg, &shared.store, down_since, err.as_deref().unwrap_or("")) {
+                            for f in &alerts {
+                                (shared.on_alert)(&shared, f);
+                            }
+                            if !alerts.is_empty() {
+                                shared.bump();
+                            }
+                        }
+                    }
+                    // Health checks every interval (and right away on start).
+                    if let Some(api) = api.as_ref().filter(|_| cfg.health.enabled && err.is_none()) {
+                        let due = last_health.is_none_or(|t| t.elapsed() >= Duration::from_secs(cfg.health.interval_minutes.max(1) as u64 * 60));
+                        if due {
+                            last_health = Some(Instant::now());
+                            match crate::health::run(&cfg, &shared.store, api) {
+                                Ok((snap, alerts)) => {
+                                    *shared.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+                                    for f in &alerts {
+                                        (shared.on_alert)(&shared, f);
+                                    }
+                                    shared.bump();
+                                }
+                                Err(e) => error!("health check failed: {e:#}"),
+                            }
+                        }
                     }
                     if added > 0 {
                         info!("{added} new IPS events");

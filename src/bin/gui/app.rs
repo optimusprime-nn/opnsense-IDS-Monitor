@@ -20,6 +20,7 @@ use crate::Controller;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Findings,
+    Health,
     Events,
     Log,
     Settings,
@@ -31,6 +32,41 @@ enum StatusFilter {
     All,
     Ack,
     FalsePositive,
+    Resolved,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KindFilter {
+    All,
+    Ips,
+    Health,
+    Exposure,
+    Device,
+    Config,
+}
+
+impl KindFilter {
+    const ALL: [KindFilter; 6] = [KindFilter::All, KindFilter::Ips, KindFilter::Health, KindFilter::Exposure, KindFilter::Device, KindFilter::Config];
+    fn label(self) -> &'static str {
+        match self {
+            KindFilter::All => "All kinds",
+            KindFilter::Ips => "IPS",
+            KindFilter::Health => "Health",
+            KindFilter::Exposure => "Exposure",
+            KindFilter::Device => "New devices",
+            KindFilter::Config => "Config changes",
+        }
+    }
+    fn matches(self, kind: &str) -> bool {
+        match self {
+            KindFilter::All => true,
+            KindFilter::Ips => matches!(kind, "inbound" | "compromise"),
+            KindFilter::Health => kind == "health",
+            KindFilter::Exposure => kind == "exposure",
+            KindFilter::Device => kind == "device",
+            KindFilter::Config => kind == "config",
+        }
+    }
 }
 
 impl StatusFilter {
@@ -40,6 +76,7 @@ impl StatusFilter {
             StatusFilter::All => "All",
             StatusFilter::Ack => "Acknowledged",
             StatusFilter::FalsePositive => "False positive",
+            StatusFilter::Resolved => "Resolved",
         }
     }
     fn db(self) -> Option<&'static str> {
@@ -48,6 +85,7 @@ impl StatusFilter {
             StatusFilter::All => None,
             StatusFilter::Ack => Some("ack"),
             StatusFilter::FalsePositive => Some("false_positive"),
+            StatusFilter::Resolved => Some("resolved"),
         }
     }
 }
@@ -58,6 +96,8 @@ enum Bg {
     /// Certificate check result, optionally offering a better Firewall URL.
     Cert { text: String, error: bool, suggest_url: Option<String> },
     Rescored { text: String },
+    /// Snapshot is stored in Shared; this only reports success / error.
+    Health(Result<(), String>),
     PolicyPlan(Result<ipswatch::ipspolicy::Plan, String>),
     Reload,
 }
@@ -111,6 +151,8 @@ pub struct App {
     /// Drop-policy preview window: None = closed; Some(None) = loading.
     policy: Option<Option<Result<ipswatch::ipspolicy::Plan, String>>>,
     policy_busy: bool,
+    f_kind: KindFilter,
+    health_busy: bool,
 }
 
 fn theme_pref(t: Theme) -> egui::ThemePreference {
@@ -172,6 +214,8 @@ impl App {
             rescoring: false,
             policy: None,
             policy_busy: false,
+            f_kind: KindFilter::All,
+            health_busy: false,
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -188,6 +232,7 @@ impl App {
             let (page, section) = t.split_once(':').unwrap_or((&t, ""));
             app.tab = match page {
                 "events" => Tab::Events,
+                "health" => Tab::Health,
                 "log" => Tab::Log,
                 "settings" => Tab::Settings,
                 _ => Tab::Findings,
@@ -206,7 +251,8 @@ impl App {
     // ---- data -----------------------------------------------------------
     fn reload(&mut self) {
         let store = &self.ctl.shared.store;
-        let mut rows = store.list_findings(self.f_status.db(), self.f_min, 1000).unwrap_or_default();
+        let mut rows = store.list_findings(self.f_status.db(), self.f_min, 5000).unwrap_or_default();
+        rows.retain(|f| self.f_kind.matches(&f.kind));
         let needle = self.f_search.trim().to_lowercase();
         if !needle.is_empty() {
             rows.retain(|f| {
@@ -478,6 +524,31 @@ impl App {
         });
     }
 
+    /// Run the health checks now (in the background).
+    fn check_health(&mut self) {
+        let cfg = self.ctl.cfg();
+        if cfg.opnsense.url.is_empty() {
+            self.message("Health", "Configure the firewall connection in Settings first.", true);
+            return;
+        }
+        self.health_busy = true;
+        let shared = self.ctl.shared.clone();
+        self.spawn(move || {
+            let r = OPNsense::new(&cfg.opnsense).and_then(|api| ipswatch::health::run(&cfg, &shared.store, &api));
+            match r {
+                Ok((snap, alerts)) => {
+                    *shared.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+                    for f in &alerts {
+                        (shared.on_alert)(&shared, f);
+                    }
+                    shared.bump();
+                    Bg::Health(Ok(()))
+                }
+                Err(e) => Bg::Health(Err(format!("{e:#}"))),
+            }
+        });
+    }
+
     /// Open the Drop-policy window and start the read-only dry run.
     fn open_policy(&mut self) {
         let cfg = self.ctl.cfg();
@@ -700,7 +771,7 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
-                for (t, l) in [(Tab::Findings, "Findings"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log")] {
+                for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log")] {
                     if ui.selectable_label(self.tab == t, l).clicked() {
                         ui.close_menu();
                         self.tab = t;
@@ -796,7 +867,7 @@ impl App {
                 self.ctl.poll_now();
             }
             ui.separator();
-            for (t, l) in [(Tab::Findings, "Findings"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log"), (Tab::Settings, "Settings")] {
+            for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log"), (Tab::Settings, "Settings")] {
                 if ui.selectable_label(self.tab == t, RichText::new(l).size(15.0)).clicked() {
                     self.tab = t;
                 }
@@ -857,8 +928,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("Show");
             egui::ComboBox::from_id_salt("fstatus").selected_text(self.f_status.label()).show_ui(ui, |ui| {
-                for s in [StatusFilter::Open, StatusFilter::All, StatusFilter::Ack, StatusFilter::FalsePositive] {
+                for s in [StatusFilter::Open, StatusFilter::All, StatusFilter::Ack, StatusFilter::FalsePositive, StatusFilter::Resolved] {
                     changed |= ui.selectable_value(&mut self.f_status, s, s.label()).changed();
+                }
+            });
+            egui::ComboBox::from_id_salt("fkind").selected_text(self.f_kind.label()).show_ui(ui, |ui| {
+                for k in KindFilter::ALL {
+                    changed |= ui.selectable_value(&mut self.f_kind, k, k.label()).changed();
                 }
             });
             ui.label("Min severity");
@@ -1233,6 +1309,12 @@ impl eframe::App for App {
                     self.policy_busy = false;
                     self.message = Some((title, text, error));
                 }
+                Bg::Health(r) => {
+                    self.health_busy = false;
+                    if let Err(e) = r {
+                        self.message = Some(("Health check".into(), e, true));
+                    }
+                }
                 Bg::PolicyPlan(p) => {
                     self.policy_busy = false;
                     if self.policy.is_some() {
@@ -1287,6 +1369,29 @@ impl eframe::App for App {
             Tab::Findings => self.findings_view(ui),
             Tab::Events => self.events_view(ui),
             Tab::Log => self.log_view(ui),
+            Tab::Health => {
+                let snap = self.ctl.shared.health.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let problems: Vec<Finding> = self
+                    .ctl
+                    .shared
+                    .store
+                    .list_findings(Some("open"), Severity::Low, 500)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|f| matches!(f.kind.as_str(), "health" | "exposure" | "device" | "config"))
+                    .collect();
+                match crate::health_view::show(ui, snap.as_ref(), &problems, self.health_busy) {
+                    crate::health_view::Action::CheckNow => self.check_health(),
+                    crate::health_view::Action::OpenFinding(k) => {
+                        self.f_status = StatusFilter::All;
+                        self.f_kind = KindFilter::All;
+                        self.selected = Some(k);
+                        self.tab = Tab::Findings;
+                        self.reload();
+                    }
+                    crate::health_view::Action::None => {}
+                }
+            }
             Tab::Settings => {
                 let saved = self.ctl.cfg();
                 let mut actions = Vec::new();

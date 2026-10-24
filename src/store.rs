@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS findings (
     notified_at TEXT, notified_severity TEXT, blocked_at TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS devices (
+    mac TEXT PRIMARY KEY, ip TEXT, hostname TEXT, vendor TEXT, interface TEXT,
+    first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+);
 "#;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,6 +57,7 @@ impl Finding {
     pub fn status_label(&self) -> &'static str {
         match self.status.as_str() {
             "ack" => "Acknowledged",
+            "resolved" => "Resolved",
             "false_positive" => "False positive",
             _ => "Open",
         }
@@ -244,9 +249,15 @@ impl Store {
                 m.targets = merge(&prev.targets, &f.targets, 50);
                 m.signatures = merge(&prev.signatures, &f.signatures, 30);
                 m.event_count = prev.event_count.max(f.event_count);
-                // Acknowledged findings reopen on new activity; false positives stay silenced.
-                if prev.status == "ack" && f.last_seen > prev.last_seen {
+                // Resolved health problems reopen when they come back. Acknowledged IPS findings
+                // reopen on new activity; acknowledged exposure/device/config/health findings stay
+                // acknowledged. False positives stay silenced.
+                let ips_kind = matches!(prev.kind.as_str(), "inbound" | "compromise");
+                if prev.status == "resolved" || (prev.status == "ack" && ips_kind && f.last_seen > prev.last_seen) {
                     m.status = "open".into();
+                    if prev.status == "resolved" {
+                        m.notified_at = None; // a recurrence is news
+                    }
                 }
                 m
             }
@@ -301,8 +312,45 @@ impl Store {
         Ok(rows)
     }
 
+    /// Record a device sighting; returns true if this MAC was never seen before.
+    pub fn upsert_device(&self, d: &crate::health::Device) -> Result<bool> {
+        let db = self.conn();
+        let known: bool = db.query_row("SELECT COUNT(*) FROM devices WHERE mac = ?1", [&d.mac], |r| r.get::<_, i64>(0))? > 0;
+        if known {
+            db.execute(
+                "UPDATE devices SET ip = ?2, hostname = CASE WHEN ?3 = '' THEN hostname ELSE ?3 END, vendor = ?4, interface = ?5, last_seen = ?6 WHERE mac = ?1",
+                params![d.mac, d.ip, d.hostname, d.vendor, d.interface, d.last_seen],
+            )?;
+        } else {
+            db.execute(
+                "INSERT INTO devices (mac, ip, hostname, vendor, interface, first_seen, last_seen) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![d.mac, d.ip, d.hostname, d.vendor, d.interface, d.first_seen, d.last_seen],
+            )?;
+        }
+        Ok(!known)
+    }
+
+    pub fn list_devices(&self, limit: usize) -> Result<Vec<crate::health::Device>> {
+        let db = self.conn();
+        let mut st = db.prepare(&format!(
+            "SELECT mac, ip, hostname, vendor, interface, first_seen, last_seen FROM devices ORDER BY first_seen DESC, last_seen DESC LIMIT {limit}"
+        ))?;
+        let rows = st.query_map([], |r| {
+            Ok(crate::health::Device {
+                mac: r.get(0)?,
+                ip: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                hostname: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                vendor: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                interface: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                first_seen: r.get(5)?,
+                last_seen: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn delete_findings(&self) -> Result<()> {
-        self.conn().execute("DELETE FROM findings", [])?;
+        self.conn().execute("DELETE FROM findings WHERE kind IN ('inbound', 'compromise')", [])?;
         Ok(())
     }
 
