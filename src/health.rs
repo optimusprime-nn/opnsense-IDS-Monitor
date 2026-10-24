@@ -587,6 +587,25 @@ fn check_config(cfg: &Config, store: &Store, api: &OPNsense, snap: &mut Snapshot
     Ok(())
 }
 
+/// Same rule category enabled from both ET open and ET telemetry: every rule loads twice.
+fn check_rule_feeds(api: &OPNsense, out: &mut Vec<Problem>) -> Result<()> {
+    let rows = api.get_raw("ids/settings/list_rulesets")?.get("rows").and_then(Value::as_array).cloned().unwrap_or_default();
+    let on: BTreeSet<String> = rows.iter().filter(|r| s(r, "enabled") == "1").map(|r| s(r, "filename")).collect();
+    let dups: Vec<&String> = on.iter().filter(|f| f.strip_prefix("et_open.").is_some_and(|rest| on.contains(rest))).collect();
+    if !dups.is_empty() {
+        out.push(Problem::health(
+            "health:ids:duplicate-feeds",
+            Severity::Low,
+            &format!("{} rule categories come from both ET open and ET telemetry", dups.len()),
+            vec![
+                "the feeds overlap partly: Suricata keeps one copy of each shared rule and logs \"Duplicate signature\" for the other".into(),
+                "each feed also has rules the other lacks, so disabling either side would lose detection - acknowledge if intended".into(),
+            ],
+        ));
+    }
+    Ok(())
+}
+
 /// Interfaces that face the internet: the IDS-inspected ones plus anything named like a WAN.
 fn wan_interfaces(api: &OPNsense) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::from(["wan".to_string()]);
@@ -631,6 +650,7 @@ pub fn run(cfg: &Config, store: &Store, api: &OPNsense) -> Result<(Snapshot, Vec
     }
     check!("devices", check_devices(cfg, store, api, &mut snap, &mut problems));
     check!("config", check_config(cfg, store, api, &mut snap, &mut problems));
+    check!("ids rulesets", check_rule_feeds(api, &mut problems));
     if cfg.crowdsec.enabled {
         match crate::crowdsec::check(cfg, store, api, &mut problems) {
             Ok(st) => snap.crowdsec = st,

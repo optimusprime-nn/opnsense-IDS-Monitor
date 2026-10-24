@@ -66,6 +66,8 @@ pub struct Plan {
     pub empty: Vec<String>,
     pub not_installed: Vec<String>,
     pub other_policies: usize,
+    /// ET open rulesets enabled alongside their ET telemetry twin (same rules loaded twice).
+    pub duplicate_feeds: Vec<String>,
 }
 
 impl Plan {
@@ -122,8 +124,18 @@ Enabled but contain no rules (left out): {}
         if !self.not_installed.is_empty() {
             s += &format!("Not available on this firewall (skipped): {}\n", self.not_installed.join(", "));
         }
+        if !self.duplicate_feeds.is_empty() {
+            s += &format!(
+                "\nNote: {} rule categories are enabled from both ET open and ET telemetry. The feeds overlap partly - \
+                 Suricata keeps the first copy of a shared rule and logs \"Duplicate signature\" for the second - but each \
+                 also has rules the other lacks, so both stay enabled. The policy covers both copies so shared rules get \
+                 the same action.\n",
+                self.duplicate_feeds.len()
+            );
+        }
         s += "\nEverything else stays on Alert (app detection, INFO, P2P, SCAN, POLICY...).\n\
-              Applying reloads Suricata: expect a few seconds of interruption on the inspected interfaces.\n\
+              Applying reloads Suricata. With a large rule set this can take several minutes, and the inspected \
+              interfaces may stall meanwhile - do it at a quiet time.\n\
               Undo at any time with \"Remove policy\" (or ipswatch-cli ips-policy --remove).";
         s
     }
@@ -201,6 +213,12 @@ pub fn plan(api: &OPNsense, wanted: &[String]) -> Result<Plan> {
         })
         .unwrap_or_default();
 
+    // Same category from both feeds: "et_open.X.rules" and the ET telemetry "X.rules".
+    let twin_enabled = |f: &str| f.strip_prefix("et_open.").is_some_and(|rest| enabled.get(rest).copied().unwrap_or(false));
+    let mut duplicate_feeds: Vec<String> =
+        enabled.iter().filter(|(f, on)| **on && twin_enabled(f)).map(|(f, _)| f.clone()).collect();
+    duplicate_feeds.sort();
+
     let mut files: Vec<&String> = uuid_by_file.keys().collect();
     files.sort();
     let (mut selected, mut not_enabled, mut empty) = (Vec::new(), Vec::new(), Vec::new());
@@ -227,7 +245,7 @@ pub fn plan(api: &OPNsense, wanted: &[String]) -> Result<Plan> {
     }
     let not_installed = wanted.iter().map(|w| w.trim().to_string()).filter(|w| !w.is_empty() && !matched_patterns.contains(w)).collect();
     let (existing, other_policies) = find_policy(api)?;
-    Ok(Plan { mode, ips_on, interfaces, existing, selected, not_enabled, empty, not_installed, other_policies })
+    Ok(Plan { mode, ips_on, interfaces, existing, selected, not_enabled, empty, not_installed, other_policies, duplicate_feeds })
 }
 
 fn check_saved(v: &Value, what: &str) -> Result<()> {
@@ -237,17 +255,35 @@ fn check_saved(v: &Value, what: &str) -> Result<()> {
     }
 }
 
-fn reconfigure(api: &OPNsense) -> Result<()> {
-    let v = api.post_raw("ids/service/reconfigure", json!({}))?;
-    let status = v.get("status").and_then(Value::as_str).unwrap_or("");
-    if !status.is_empty() && !status.eq_ignore_ascii_case("ok") {
-        bail!("Suricata reload reported: {v}");
+/// Reinstall rules from the enabled rulesets and restart Suricata, then wait until it runs again.
+/// Large rule sets take minutes; if the call times out we keep polling the service status.
+pub fn reconfigure(api: &OPNsense) -> Result<std::time::Duration> {
+    let started = std::time::Instant::now();
+    match api.post_raw("ids/service/reconfigure", json!({})) {
+        Ok(v) => {
+            let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+            if !status.is_empty() && !status.eq_ignore_ascii_case("ok") {
+                bail!("Suricata reload reported: {v}");
+            }
+        }
+        Err(e) => log::warn!("reload call didn't return ({e:#}); waiting for Suricata to come back"),
     }
-    Ok(())
+    // Wait for the service to report running (up to 20 minutes).
+    let deadline = started + std::time::Duration::from_secs(20 * 60);
+    loop {
+        let running = api.ids_status().map(|s| s.eq_ignore_ascii_case("running")).unwrap_or(false);
+        if running {
+            return Ok(started.elapsed());
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("Suricata was not running again {} minutes after the reload", started.elapsed().as_secs() / 60);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(15));
+    }
 }
 
-/// Create or update the policy from a plan, then reload Suricata.
-pub fn apply(api: &OPNsense, plan: &Plan) -> Result<String> {
+/// Save (create or update) the policy without reloading. Returns "Created" / "Updated".
+pub fn save_policy(api: &OPNsense, plan: &Plan) -> Result<&'static str> {
     if plan.selected.is_empty() {
         bail!("No enabled high-risk rulesets matched - nothing to apply.");
     }
@@ -256,6 +292,35 @@ pub fn apply(api: &OPNsense, plan: &Plan) -> Result<String> {
         None => ("ids/settings/add_policy".to_string(), "Created"),
     };
     check_saved(&api.post_raw(&path, plan.payload())?, "The policy")?;
+    Ok(verb)
+}
+
+/// Number of installed rules and "Duplicate signature" errors logged since `since` (local time).
+pub fn verify(api: &OPNsense, since: chrono::DateTime<chrono::Utc>) -> Result<(u64, usize)> {
+    let total = api
+        .post_raw("ids/settings/search_installed_rules", json!({"current": 1, "rowCount": 1, "searchPhrase": ""}))?
+        .get("total")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let log = api.post_raw(
+        "diagnostics/log/core/suricata",
+        json!({"current": 1, "rowCount": 5000, "searchPhrase": "Duplicate signature"}),
+    )?;
+    let dups = log
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| r.get("timestamp").and_then(Value::as_str).and_then(crate::parse_iso).is_some_and(|t| t >= since))
+                .count()
+        })
+        .unwrap_or(0);
+    Ok((total, dups))
+}
+
+/// Create or update the policy from a plan, then reload Suricata.
+pub fn apply(api: &OPNsense, plan: &Plan) -> Result<String> {
+    let verb = save_policy(api, plan)?;
     reconfigure(api)?;
     let msg = format!(
         "{verb} policy \"{POLICY_DESCRIPTION}\": Alert rules in {} rulesets ({} rules) set to Drop. Suricata reloaded.",
@@ -300,6 +365,7 @@ mod tests {
             selected: vec![RulesetPlan { filename: "a.rules".into(), uuid: "u1".into(), rules: 5, alert_rules: 5 }],
             not_enabled: vec![],
             empty: vec![],
+            duplicate_feeds: vec![],
             not_installed: vec![],
             other_policies: 0,
         };

@@ -60,7 +60,7 @@ impl OPNsense {
         }
         // Reloading Suricata with a large rule set can take minutes.
         if path.starts_with("ids/service/reconfigure") {
-            r = r.timeout(Duration::from_secs(180));
+            r = r.timeout(Duration::from_secs(900));
         }
         // Only reads are safe to retry; never repeat a write.
         let read_only = method == "GET" || path.contains("search") || path.contains("query_alerts");
