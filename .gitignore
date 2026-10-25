@@ -17,3 +17,6 @@ config.toml
 # App logs
 *.log
 *.log.1
+
+# Local reviews of your own firewall (not for the repo)
+/reviews/
