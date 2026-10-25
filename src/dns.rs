@@ -294,6 +294,31 @@ fn tcp_open(host: &str, port: u16, timeout: Duration) -> bool {
 // ---------------------------------------------------------------- per-server checks
 
 /// Strip volatile values and hide secrets so settings can be stored and compared.
+/// Domains in a blocklist: hosts format ("0.0.0.0 bad.example"), plain domains, "#" comments.
+pub fn parse_blocklist(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let first = parts.next()?;
+            let name = if first.parse::<std::net::IpAddr>().is_ok() { parts.next()? } else { first };
+            let name = name.trim_end_matches('.').to_lowercase();
+            (name.contains('.') && !matches!(name.as_str(), "localhost" | "localhost.localdomain") && name.parse::<std::net::IpAddr>().is_err()).then_some(name)
+        })
+        .collect()
+}
+
+/// Download a blocklist (the URL may contain a key; it never appears in errors).
+pub fn fetch_blocklist(url: &str) -> Result<Vec<String>> {
+    let agent = ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()?)).timeout(Duration::from_secs(90)).build();
+    let r = agent.get(url).call();
+    match r {
+        Ok(resp) => Ok(parse_blocklist(&resp.into_string()?)),
+        Err(ureq::Error::Status(code, _)) => bail!("{}: HTTP {code}", mask_url(url)),
+        Err(ureq::Error::Transport(t)) => bail!("{}: download failed ({:?}: {})", mask_url(url), t.kind(), mask_url(&t.message().unwrap_or_default())),
+    }
+}
+
 /// Hide keys embedded in URLs (e.g. abuse.ch ".../exports/<auth-key>/hostfile.txt" or "?key=..."):
 /// any path or query part of 24+ letters/digits that mixes both.
 pub fn mask_url(url: &str) -> String {
@@ -1101,6 +1126,12 @@ mod tests {
         let u = sanitize(&json!({"blockListUrls": ["https://threatfox-api.abuse.ch/v2/files/exports/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c/hostfile.txt"]}));
         assert_eq!(u["blockListUrls"][0], "https://threatfox-api.abuse.ch/v2/files/exports/***/hostfile.txt");
         assert_eq!(mask_url("https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts.txt"), "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts.txt");
+    }
+
+    #[test]
+    fn blocklist_parsing() {
+        let t = "# comment\n0.0.0.0 bad.example\n127.0.0.1\tlocalhost\n127.0.0.1 evil.test # c2\nplain.example.org\n0.0.0.0 1.2.3.4\n\n";
+        assert_eq!(parse_blocklist(t), vec!["bad.example", "evil.test", "plain.example.org"]);
     }
 
     #[test]

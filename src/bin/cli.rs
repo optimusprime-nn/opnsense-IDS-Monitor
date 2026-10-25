@@ -95,11 +95,14 @@ enum Cmd {
         #[arg(long)]
         server: Option<String>,
         /// Blocklist URL to add (repeatable)
-        #[arg(long = "add", required_unless_present = "remove")]
+        #[arg(long = "add", required_unless_present_any = ["remove", "verify"])]
         add: Vec<String>,
         /// Blocklist URL to remove (repeatable)
         #[arg(long = "remove")]
         remove: Vec<String>,
+        /// Check the configured lists: loaded, and listed domains that resolve publicly are blocked here
+        #[arg(long, conflicts_with_all = ["add", "remove"])]
+        verify: bool,
         #[arg(long)]
         yes: bool,
     },
@@ -151,6 +154,62 @@ fn print_findings(store: &Store, all: bool, min: Severity, limit: usize) -> Resu
             println!("            - {r}");
         }
     }
+    Ok(())
+}
+
+/// For each server: lists configured and loaded, then up to 3 domains per list that resolve via
+/// 1.1.1.1 must be blocked by the server (port 53), and a normal name must still resolve.
+fn verify_blocklists(cfg: &config::Config, servers: &[&config::DnsServerCfg]) -> Result<()> {
+    use ipswatch::dns::{fetch_blocklist, mask_url, query, Technitium};
+    use std::collections::HashMap;
+    let to = std::time::Duration::from_secs(3);
+    let mut samples: HashMap<String, Result<(usize, Vec<String>), String>> = HashMap::new();
+    let mut failures = 0;
+    for srv in servers {
+        let t = Technitium::new(srv, cfg.dns.timeout_seconds)?;
+        let set = t.get("settings/get", &[])?;
+        let stats = t.get("dashboard/stats/get", &[("type", "LastHour")])?;
+        let urls: Vec<String> = set.get("blockListUrls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let s = |k: &str| set.get(k).map(|v| v.to_string()).unwrap_or_default();
+        println!("{} ({}): blocking {} · type {} · {} list(s) · {} blocklist domains loaded · next update {}",
+            srv.label(), srv.host(), s("enableBlocking"), s("blockingType"), urls.len(),
+            stats.pointer("/stats/blockListZones").map(|v| v.to_string()).unwrap_or("?".into()), s("blockListNextUpdatedOn"));
+        if urls.is_empty() {
+            failures += 1;
+            println!("  FAIL: no blocklist URLs saved");
+        }
+        for url in &urls {
+            let entry = samples.entry(url.clone()).or_insert_with(|| {
+                fetch_blocklist(url).map_err(|e| format!("{e:#}")).map(|names| {
+                    // Listed names that really resolve publicly, so NXDOMAIN here can only mean "blocked".
+                    let live: Vec<String> = names.iter().take(400).filter(|d| query("1.1.1.1", d, to).ok).take(3).cloned().collect();
+                    (names.len(), live)
+                })
+            });
+            match entry {
+                Err(e) => {
+                    failures += 1;
+                    println!("  FAIL {e}");
+                }
+                Ok((n, live)) => {
+                    println!("  list {} - {n} domains, {} sampled that resolve publicly", mask_url(url), live.len());
+                    for d in live.iter() {
+                        let l = query(&srv.host(), d, to);
+                        let blocked = l.result == "NXDOMAIN" || (l.result == "NOERROR" && l.answers == 0);
+                        failures += usize::from(!blocked);
+                        println!("    {} {d}: {} here (1.1.1.1 answers it)", if blocked { "BLOCKED" } else { "NOT BLOCKED" }, l.result);
+                    }
+                }
+            }
+        }
+        for d in cfg.dns.test_domains.iter().filter(|d| !d.trim().is_empty()) {
+            let l = query(&srv.host(), d.trim(), to);
+            failures += usize::from(!l.ok);
+            println!("  normal lookup {}: {} ({} answers)", d.trim(), l.result, l.answers);
+        }
+    }
+    println!("
+{}", if failures == 0 { "VERIFIED: blocklists loaded and blocking on every server".to_string() } else { format!("{failures} check(s) failed") });
     Ok(())
 }
 
@@ -352,9 +411,12 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::DnsBlocklists { server, add, remove, yes } => {
+        Cmd::DnsBlocklists { server, add, remove, verify, yes } => {
             let servers: Vec<_> = cfg.dns.servers.iter().filter(|s| server.as_ref().is_none_or(|n| s.label() == *n || s.host() == *n)).collect();
             anyhow::ensure!(!servers.is_empty(), "no matching DNS server in the config");
+            if verify {
+                return verify_blocklists(&cfg, &servers);
+            }
             for srv in servers {
                 let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?;
                 let set = t.get("settings/get", &[])?;
