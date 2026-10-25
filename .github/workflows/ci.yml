@@ -1,0 +1,72 @@
+name: CI
+
+# Linux: library + ipswatch-cli (no desktop app) on the org's self-hosted runners.
+# Windows: build.ps1 as-is, including the desktop app and the Windows-only tests.
+#   It runs on windows-latest until the self-hosted Windows runner is online;
+#   then switch runs-on to [self-hosted, windows, msvc].
+# fmt and clippy are advisory for now: they report, but don't fail the build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Test + CLI build (Linux, self-hosted)
+    runs-on: [self-hosted, linux, big]
+    container:
+      image: rust:1-bookworm
+      volumes:
+        - /srv/ci-cache/cargo/registry:/usr/local/cargo/registry
+        - /srv/ci-cache/cargo/git:/usr/local/cargo/git
+    steps:
+      - uses: actions/checkout@v4
+
+      # native-tls -> openssl-sys
+      - name: System libraries
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      - run: rustup component add clippy rustfmt
+
+      - name: rustfmt (advisory)
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --release --no-default-features
+
+      - name: Build CLI
+        run: cargo build --release --no-default-features --bin ipswatch-cli
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipswatch-cli-linux
+          path: target/release/ipswatch-cli
+
+  windows:
+    name: Test + build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build.ps1 (cargo test --release, cargo build --release)
+        shell: pwsh
+        run: ./build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipswatch-windows
+          path: dist/*.exe
