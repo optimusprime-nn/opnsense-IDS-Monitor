@@ -318,6 +318,153 @@ pub fn verify(api: &OPNsense, since: chrono::DateTime<chrono::Utc>) -> Result<(u
     Ok((total, dups))
 }
 
+// ---------------------------------------------------------------- disabling rulesets
+
+fn count_active(api: &OPNsense, source: Option<&str>) -> Result<u64> {
+    let mut body = json!({"current": 1, "rowCount": 1, "searchPhrase": "", "status": "enabled"});
+    if let Some(f) = source {
+        body["source"] = json!(f);
+    }
+    Ok(api.post_raw("ids/settings/search_installed_rules", body)?.get("total").and_then(Value::as_u64).unwrap_or(0))
+}
+
+fn enabled_rulesets(api: &OPNsense) -> Result<HashMap<String, bool>> {
+    Ok(api
+        .get_raw("ids/settings/list_rulesets")?
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| Some((r.get("filename")?.as_str()?.to_string(), r.get("enabled").and_then(Value::as_str) == Some("1"))))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+#[derive(Clone, Debug)]
+pub struct RulesetChange {
+    pub file: String,
+    pub found: bool,
+    pub enabled: bool,
+    pub active: u64,
+    /// Used by the IPS Watch Drop policy (disabling it removes those Drop rules too).
+    pub in_policy: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DisablePlan {
+    pub changes: Vec<RulesetChange>,
+    pub active_total: u64,
+}
+
+impl DisablePlan {
+    pub fn to_disable(&self) -> Vec<String> {
+        self.changes.iter().filter(|c| c.found && c.enabled).map(|c| c.file.clone()).collect()
+    }
+
+    pub fn render(&self) -> String {
+        let removed: u64 = self.changes.iter().filter(|c| c.found && c.enabled).map(|c| c.active).sum();
+        let mut s = format!("  {:<46} {:>8}  {}\n", "Ruleset", "Active", "Status");
+        for c in &self.changes {
+            let status = match (c.found, c.enabled) {
+                (false, _) => "not on this firewall - skipped",
+                (true, false) => "already disabled - skipped",
+                (true, true) if c.in_policy => "WILL BE DISABLED (used by the Drop policy!)",
+                (true, true) => "will be disabled",
+            };
+            s += &format!("  {:<46} {:>8}  {}\n", c.file, c.active, status);
+        }
+        s += &format!(
+            "\n{} rulesets to disable, {} active rules removed: {} -> {} active rules ({:.1}% less).\n",
+            self.to_disable().len(),
+            removed,
+            self.active_total,
+            self.active_total.saturating_sub(removed),
+            removed as f64 * 100.0 / self.active_total.max(1) as f64
+        );
+        if self.changes.iter().any(|c| c.enabled && c.in_policy) {
+            s += "WARNING: some of these rulesets are used by the IPS Watch Drop policy; their Drop rules go too.\n";
+        }
+        s += "Applying = one Suricata reload (several minutes; the inspected WANs may stall). Re-enable any ruleset later \
+              under Services > Intrusion Detection > Administration > Download.";
+        s
+    }
+}
+
+/// Read-only: what disabling these rulesets would do.
+pub fn plan_disable(api: &OPNsense, files: &[String]) -> Result<DisablePlan> {
+    let enabled = enabled_rulesets(api)?;
+    let policy_files: Vec<String> = match find_policy(api)?.0 {
+        Some(uuid) => api
+            .get_raw(&format!("ids/settings/get_policy/{uuid}"))?
+            .pointer("/policy/rulesets")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.values()
+                    .filter(|o| o.get("selected").and_then(Value::as_i64) == Some(1))
+                    .filter_map(|o| o.get("value").and_then(Value::as_str).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => vec![],
+    };
+    let mut changes = Vec::new();
+    for f in files {
+        let found = enabled.contains_key(f);
+        let on = enabled.get(f).copied().unwrap_or(false);
+        changes.push(RulesetChange {
+            file: f.clone(),
+            found,
+            enabled: on,
+            active: if on { count_active(api, Some(f))? } else { 0 },
+            in_policy: policy_files.contains(f),
+        });
+    }
+    Ok(DisablePlan { changes, active_total: count_active(api, None)? })
+}
+
+/// Turn rulesets off (saved; takes effect at the next reconfigure).
+pub fn disable_rulesets(api: &OPNsense, files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let v = api.post_raw(&format!("ids/settings/toggle_ruleset/{}/0", files.join(",")), json!({}))?;
+    match v.get("status").and_then(Value::as_str) {
+        Some("0") | Some("none") => Ok(()),
+        _ => bail!("disabling rulesets was not accepted: {v}"),
+    }
+}
+
+/// Disable the planned rulesets and reload Suricata once, then verify.
+pub fn apply_disable(api: &OPNsense, plan: &DisablePlan) -> Result<String> {
+    let files = plan.to_disable();
+    if files.is_empty() {
+        return Ok("Nothing to do: all listed rulesets are already disabled or not present.".into());
+    }
+    let started = chrono::Utc::now();
+    disable_rulesets(api, &files)?;
+    log::warn!("Disabled {} rulesets (saved); reloading Suricata", files.len());
+    let took = reconfigure(api)?;
+    std::thread::sleep(std::time::Duration::from_secs(30)); // let Suricata finish logging its rule load
+    let now_enabled = enabled_rulesets(api)?;
+    let still_on: Vec<&String> = files.iter().filter(|f| now_enabled.get(*f).copied().unwrap_or(false)).collect();
+    let active_after = count_active(api, None)?;
+    let (_, dup_errors) = verify(api, started)?;
+    let msg = format!(
+        "Disabled {} rulesets. Suricata reload took {} min {} s and it is running. Active rules {} -> {}. \
+         Duplicate-signature errors in this load: {}.{}",
+        files.len() - still_on.len(),
+        took.as_secs() / 60,
+        took.as_secs() % 60,
+        plan.active_total,
+        active_after,
+        dup_errors,
+        if still_on.is_empty() { String::new() } else { format!(" STILL ENABLED: {still_on:?}") }
+    );
+    log::warn!("{msg}");
+    Ok(msg)
+}
+
 /// Create or update the policy from a plan, then reload Suricata.
 pub fn apply(api: &OPNsense, plan: &Plan) -> Result<String> {
     let verb = save_policy(api, plan)?;

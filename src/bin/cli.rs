@@ -88,6 +88,14 @@ enum Cmd {
         /// Query parameters as key=value
         params: Vec<String>,
     },
+    /// Disable the Suricata rulesets listed in a file (one filename per line, # comments ok) with
+    /// a single reload. Without --yes: dry run. Logs to rulesets-change.log next to the config.
+    IpsRulesets {
+        #[arg(long)]
+        disable_from: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Recompute all findings from stored events with the current rules (keeps your ack/false-positive marks)
     Rescore,
     /// Print raw alert rows from the firewall API (diagnostics)
@@ -133,7 +141,11 @@ fn print_findings(store: &Store, all: bool, min: Severity, limit: usize) -> Resu
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    logbuf::init(None, true);
+    let log_file = match &cli.cmd {
+        Cmd::IpsRulesets { .. } => Some(cli.config.clone().unwrap_or_else(config::default_config_path).with_file_name("rulesets-change.log")),
+        _ => None,
+    };
+    logbuf::init(log_file, true);
     let cfg_path = cli.config.unwrap_or_else(config::default_config_path);
     let cfg = config::load(&cfg_path)?;
     let store = Arc::new(Store::open(&cfg.db_path_for(&cfg_path))?);
@@ -185,6 +197,29 @@ fn main() -> Result<()> {
         Cmd::Fp { key } => store.set_status(&key, "false_positive")?,
         Cmd::Reopen { key } => store.set_status(&key, "open")?,
         Cmd::Report { out } => println!("wrote {} ({} findings)", out.display(), report::write_html(&store, &out)?),
+        Cmd::IpsRulesets { disable_from, yes } => {
+            let text = std::fs::read_to_string(&disable_from).with_context(|| format!("reading {}", disable_from.display()))?;
+            let files: Vec<String> = text
+                .lines()
+                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            log::info!("Ruleset change from {} ({} rulesets, {})", disable_from.display(), files.len(), if yes { "APPLY" } else { "dry run" });
+            let a = api()?;
+            let plan = ipswatch::ipspolicy::plan_disable(&a, &files)?;
+            println!("{}", plan.render());
+            if yes {
+                match ipswatch::ipspolicy::apply_disable(&a, &plan) {
+                    Ok(msg) => println!("\n{msg}"),
+                    Err(e) => {
+                        log::error!("Ruleset change failed: {e:#}");
+                        return Err(e);
+                    }
+                }
+            } else {
+                println!("\nDRY RUN - nothing was changed. Apply with --yes.");
+            }
+        }
         Cmd::IpsPolicy { apply, remove, yes } => {
             let a = api()?;
             if remove {
