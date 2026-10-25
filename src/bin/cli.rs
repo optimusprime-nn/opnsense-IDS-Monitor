@@ -88,6 +88,21 @@ enum Cmd {
         /// Query parameters as key=value
         params: Vec<String>,
     },
+    /// Add or remove blocklist URLs on the Technitium DNS servers (keeps other lists) and download them.
+    /// Without --yes: dry run. Needs a token allowed to modify Settings.
+    DnsBlocklists {
+        /// Only this server (name or address); default: all configured
+        #[arg(long)]
+        server: Option<String>,
+        /// Blocklist URL to add (repeatable)
+        #[arg(long = "add", required_unless_present = "remove")]
+        add: Vec<String>,
+        /// Blocklist URL to remove (repeatable)
+        #[arg(long = "remove")]
+        remove: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Disable the Suricata rulesets listed in a file (one filename per line, # comments ok) with
     /// a single reload. Without --yes: dry run. Logs to rulesets-change.log next to the config.
     IpsRulesets {
@@ -334,6 +349,40 @@ fn main() -> Result<()> {
                 println!("  {:<8} {}", f.severity.as_str().to_uppercase(), f.title);
                 for r in &f.reasons {
                     println!("             - {r}");
+                }
+            }
+        }
+        Cmd::DnsBlocklists { server, add, remove, yes } => {
+            let servers: Vec<_> = cfg.dns.servers.iter().filter(|s| server.as_ref().is_none_or(|n| s.label() == *n || s.host() == *n)).collect();
+            anyhow::ensure!(!servers.is_empty(), "no matching DNS server in the config");
+            for srv in servers {
+                let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?;
+                let set = t.get("settings/get", &[])?;
+                let mut urls: Vec<String> = set.get("blockListUrls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                let old = urls.clone();
+                let before = urls.len();
+                urls.retain(|u| !remove.contains(u));
+                for u in &add {
+                    if !urls.iter().any(|x| x == u) {
+                        urls.push(u.clone());
+                    }
+                }
+                let shown = |v: &[String]| v.iter().map(|u| ipswatch::dns::mask_url(u)).collect::<Vec<_>>().join(", ");
+                println!("{}: {} list(s) now, {} after: {}", srv.label(), before, urls.len(), shown(&urls));
+                if urls == old {
+                    println!("  nothing to add");
+                } else if yes {
+                    // Technitium clears the list when given "false".
+                    let value = if urls.is_empty() { "false".to_string() } else { urls.join(",") };
+                    t.get("settings/set", &[("blockListUrls", &value)])?;
+                    println!("  saved");
+                } else {
+                    println!("  DRY RUN - add --yes to save");
+                    continue;
+                }
+                if yes && !urls.is_empty() {
+                    t.get("settings/forceUpdateBlockLists", &[])?;
+                    println!("  blocklist download started");
                 }
             }
         }

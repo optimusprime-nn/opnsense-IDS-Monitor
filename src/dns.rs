@@ -294,6 +294,31 @@ fn tcp_open(host: &str, port: u16, timeout: Duration) -> bool {
 // ---------------------------------------------------------------- per-server checks
 
 /// Strip volatile values and hide secrets so settings can be stored and compared.
+/// Hide keys embedded in URLs (e.g. abuse.ch ".../exports/<auth-key>/hostfile.txt" or "?key=..."):
+/// any path or query part of 24+ letters/digits that mixes both.
+pub fn mask_url(url: &str) -> String {
+    let mut out = String::new();
+    let mut part = String::new();
+    let flush = |part: &mut String, out: &mut String| {
+        let keyish = part.len() >= 24
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && part.chars().any(|c| c.is_ascii_digit())
+            && part.chars().any(|c| c.is_ascii_alphabetic());
+        out.push_str(if keyish { "***" } else { part });
+        part.clear();
+    };
+    for c in url.chars() {
+        if matches!(c, '/' | '?' | '&' | '=' | '#') {
+            flush(&mut part, &mut out);
+            out.push(c);
+        } else {
+            part.push(c);
+        }
+    }
+    flush(&mut part, &mut out);
+    out
+}
+
 pub fn sanitize(v: &Value) -> Value {
     match v {
         Value::Object(m) => {
@@ -313,6 +338,7 @@ pub fn sanitize(v: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(a) => Value::Array(a.iter().map(sanitize).collect()),
+        Value::String(x) if x.starts_with("http://") || x.starts_with("https://") => Value::String(mask_url(x)),
         x => x.clone(),
     }
 }
@@ -1072,6 +1098,9 @@ mod tests {
         let d = settings_diff(&a, &b);
         assert_eq!(d.len(), 2, "{d:?}");
         assert!(d.iter().any(|l| l.starts_with("forwarders:") && l.contains("9.9.9.9")));
+        let u = sanitize(&json!({"blockListUrls": ["https://threatfox-api.abuse.ch/v2/files/exports/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c/hostfile.txt"]}));
+        assert_eq!(u["blockListUrls"][0], "https://threatfox-api.abuse.ch/v2/files/exports/***/hostfile.txt");
+        assert_eq!(mask_url("https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts.txt"), "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts.txt");
     }
 
     #[test]
