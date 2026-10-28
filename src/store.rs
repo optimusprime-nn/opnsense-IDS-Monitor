@@ -134,8 +134,10 @@ impl Store {
             std::fs::create_dir_all(dir)?;
         }
         let db = Connection::open(path)?;
+        // Wait for other writers (the desktop app and CLI share this file) before anything else,
+        // so opening never fails just because the other one is mid-write.
+        db.busy_timeout(std::time::Duration::from_secs(30))?;
         db.pragma_update(None, "journal_mode", "WAL")?;
-        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(SCHEMA)?;
         // v0.2 stored API events (which never carry a severity) as severity 3; mark them unknown.
         if db.query_row("SELECT v FROM kv WHERE k = 'migr_api_sev'", [], |r| r.get::<_, String>(0)).optional()?.is_none() {

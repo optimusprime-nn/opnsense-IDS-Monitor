@@ -105,6 +105,34 @@ impl Controller {
     }
 }
 
+/// Record every panic (message, thread, source location) in ipswatch.log and crash.log.
+/// A panic on the UI thread ends the app, so also tell the user instead of vanishing silently.
+fn install_panic_hook(crash_file: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let line = format!("{} PANIC in thread '{thread}' at {at}: {msg}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        log::error!("PANIC in thread '{thread}' at {at}: {msg}");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&crash_file) {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}\n{}", std::backtrace::Backtrace::force_capture());
+        }
+        if thread == "monitor" {
+            ipswatch::monitor::MONITOR_PANICS.fetch_add(1, Ordering::Relaxed);
+        } else if thread == "main" {
+            win::error_box("IPS Watch stopped unexpectedly", &format!("{msg}\n\nat {at}\n\nDetails were saved to {}.", crash_file.display()));
+        }
+        default(info);
+    }));
+}
+
 fn main() -> eframe::Result<()> {
     let minimized_arg = std::env::args().any(|a| a == "--minimized");
     let cfg_path = std::env::args()
@@ -121,6 +149,7 @@ fn main() -> eframe::Result<()> {
 
     let _ = std::fs::create_dir_all(cfg_path.parent().unwrap_or(std::path::Path::new(".")));
     logbuf::init(Some(cfg_path.with_file_name("ipswatch.log")), cfg!(debug_assertions));
+    install_panic_hook(cfg_path.with_file_name("crash.log"));
     toast::register_app_id();
 
     let (cfg, cfg_error) = match config::load(&cfg_path) {
@@ -135,6 +164,7 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     };
+    let saved = ipswatch::monitor::saved_snapshots(&store);
     // Keep the Run entry pointing at this exe if the app was moved/updated.
     if cfg.gui.start_with_windows && ipswatch::autostart::is_stale() {
         let _ = ipswatch::autostart::set_enabled(true);
@@ -165,8 +195,8 @@ fn main() -> eframe::Result<()> {
                 store,
                 status: Mutex::new(Status::default()),
                 data_version: AtomicU64::new(1),
-                health: Mutex::new(None),
-                dns: Mutex::new(None),
+                health: Mutex::new(saved.0),
+                dns: Mutex::new(saved.1),
                 on_alert: Box::new(|sh: &Shared, f| {
                     let c = sh.cfg.read().unwrap_or_else(|e| e.into_inner());
                     if c.gui.desktop_alerts && f.severity >= c.gui.alert_min_severity {

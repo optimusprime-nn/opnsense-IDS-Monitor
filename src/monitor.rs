@@ -51,7 +51,35 @@ pub struct Shared {
     pub on_cycle: Box<dyn Fn() + Send + Sync>,
 }
 
+/// Panics on the monitor thread so far (the GUI restarts monitoring after one).
+/// Last saved health / DNS results (to show right after a restart).
+pub fn saved_snapshots(store: &Store) -> (Option<crate::health::Snapshot>, Option<crate::dns::Snapshot>) {
+    let load = |k: &str| store.get_kv(k).ok().flatten();
+    (
+        load("snapshot_health").and_then(|j| serde_json::from_str(&j).ok()),
+        load("snapshot_dns").and_then(|j| serde_json::from_str(&j).ok()),
+    )
+}
+
+pub static MONITOR_PANICS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 impl Shared {
+    /// Latest health result: shown at once and saved, so it survives a restart.
+    pub fn set_health(&self, snap: crate::health::Snapshot) {
+        if let Ok(j) = serde_json::to_string(&snap) {
+            let _ = self.store.set_kv("snapshot_health", &j);
+        }
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+    }
+
+    /// Latest DNS result: shown at once and saved, so it survives a restart.
+    pub fn set_dns(&self, snap: crate::dns::Snapshot) {
+        if let Ok(j) = serde_json::to_string(&snap) {
+            let _ = self.store.set_kv("snapshot_dns", &j);
+        }
+        *self.dns.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+    }
+
     pub fn bump(&self) {
         self.data_version.fetch_add(1, Ordering::Relaxed);
     }
@@ -79,7 +107,7 @@ pub fn run_dns(shared: &Shared, cfg: &Config) -> Option<String> {
     let exposure = shared.health.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.exposure.clone()).unwrap_or_default();
     match crate::dns::run(cfg, &shared.store, &exposure, &recent_ids_restarts(cfg)) {
         Ok((snap, alerts)) => {
-            *shared.dns.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+            shared.set_dns(snap);
             for f in &alerts {
                 (shared.on_alert)(shared, f);
             }
@@ -175,7 +203,7 @@ impl Monitor {
                             last_health = Some(Instant::now());
                             match crate::health::run(&cfg, &shared.store, api) {
                                 Ok((snap, alerts)) => {
-                                    *shared.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+                                    shared.set_health(snap);
                                     for f in &alerts {
                                         (shared.on_alert)(&shared, f);
                                     }

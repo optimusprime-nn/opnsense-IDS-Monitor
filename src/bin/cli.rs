@@ -214,6 +214,15 @@ fn verify_blocklists(cfg: &config::Config, servers: &[&config::DnsServerCfg]) ->
 }
 
 fn main() -> Result<()> {
+    let result = run();
+    // Scheduled runs have no console: make sure a failure is in the log file.
+    if let Err(e) = &result {
+        log::error!("ipswatch-cli failed: {e:#}");
+    }
+    result
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let log_file = match &cli.cmd {
         Cmd::IpsRulesets { .. } => Some(cli.config.clone().unwrap_or_else(config::default_config_path).with_file_name("rulesets-change.log")),
