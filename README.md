@@ -28,14 +28,20 @@ alerts from OPNsense, stores them in SQLite, correlates them with the firewall l
 
 ## Install / build
 
-Download or build `IPSWatch.exe` and run it. It is a single portable file with no installer and no runtime.
+Run `IPSWatch-Setup-<version>.exe`. It installs for your Windows account only (no admin rights) into
+`%LOCALAPPDATA%\Programs\IPS Watch`, adds a Start menu entry and appears in Settings > Apps for
+uninstalling. Running it again upgrades in place (it closes and restarts the installed copy).
+Uninstalling keeps your settings and history. `IPSWatch.exe` also still runs on its own as a portable file.
 
 ```powershell
-.\build.ps1          # runs the tests, builds dist\IPSWatch.exe and dist\ipswatch-cli.exe
+.\build.ps1          # runs the tests, builds dist\IPSWatch.exe, dist\ipswatch-cli.exe
+                     # and, with Inno Setup 6 installed, dist\IPSWatch-Setup-<version>.exe
 ```
 
-Building needs the Rust toolchain (`rustup`, MSVC target). Settings, the database and the log live in
-`%APPDATA%\ipswatch\`.
+Building needs the Rust toolchain (`rustup`, MSVC target); the installer needs Inno Setup 6
+(`winget install JRSoftware.InnoSetup`). Settings, the database and the log live in `%APPDATA%\ipswatch\`.
+Turn on "Start with Windows" in Settings after installing; if it was on for a copy elsewhere, the installed
+copy takes it over the first time it runs.
 
 ## First run
 
