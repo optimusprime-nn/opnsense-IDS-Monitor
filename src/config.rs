@@ -422,7 +422,7 @@ impl Default for IpsPolicyCfg {
 #[serde(default)]
 pub struct DnsServerCfg {
     pub name: String,
-    /// Web console, e.g. http://192.168.1.99:5380
+    /// Web console, e.g. http://192.168.1.53:5380
     pub url: String,
     /// API token (Administration > Sessions > Create Token); DPAPI-encrypted on disk.
     pub token: String,
@@ -548,7 +548,7 @@ impl Config {
         }
         for d in &self.dns.servers {
             if !(d.url.starts_with("http://") || d.url.starts_with("https://")) || d.host().is_empty() {
-                bail!("DNS server '{}': console URL must look like http://192.168.1.99:5380", d.label());
+                bail!("DNS server '{}': console URL must look like http://192.168.1.53:5380", d.label());
             }
         }
         Ok(())
@@ -615,7 +615,7 @@ mod tests {
         let mut c = Config::default();
         c.opnsense.api_secret = "s3cr\"et".into();
         c.detect.ignore_sids = vec![1, 2];
-        c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.99:5380".into(), token: "t0kenvalue".into() });
+        c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.53:5380".into(), token: "t0kenvalue".into() });
         save(&c, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         #[cfg(windows)]
@@ -648,7 +648,7 @@ mod tests {
     #[test]
     fn dns_host() {
         let d = |u: &str| DnsServerCfg { url: u.into(), ..Default::default() }.host();
-        assert_eq!(d("http://192.168.1.99:5380"), "192.168.1.99");
+        assert_eq!(d("http://192.168.1.53:5380"), "192.168.1.53");
         assert_eq!(d("https://ns1.example.com/"), "ns1.example.com");
         assert_eq!(d("http://[fd00::1]:5380"), "fd00::1");
     }

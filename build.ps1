@@ -6,6 +6,10 @@
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot
 
+# Keep local folder names (project path, user profile) out of the executables.
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
+$env:RUSTFLAGS = "--remap-path-prefix=$PSScriptRoot=ipswatch --remap-path-prefix=$cargoHome=cargo --remap-path-prefix=$env:USERPROFILE=~"
+
 cargo test --release
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 

@@ -289,7 +289,7 @@ fn acknowledged_exposure_stays_acknowledged_but_resolved_health_reopens() {
     e.last_seen = "2099-01-01T00:00:00.000000+00:00".into();
     assert_eq!(store.upsert_finding(&e).unwrap().status, "ack");
     // Health: resolved -> comes back -> open again, and re-notifies.
-    let h = health_finding("health:gateway:STARLINK", "health");
+    let h = health_finding("health:gateway:WAN_GW", "health");
     store.upsert_finding(&h).unwrap();
     store.set_notified(&h.key, &ipswatch::now_iso(), Severity::Low).unwrap();
     store.set_status(&h.key, "resolved").unwrap();
