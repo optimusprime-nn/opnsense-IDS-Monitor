@@ -157,8 +157,13 @@ fn main() -> eframe::Result<()> {
         Err(e) => (Config::default(), Some(format!("{e:#}"))),
     };
     let db_path = cfg.db_path_for(&cfg_path);
-    let store = match Store::open(&db_path) {
-        Ok(s) => Arc::new(s),
+    let store = match Store::open_or_repair(&db_path) {
+        Ok((s, repaired)) => {
+            if let Some(msg) = repaired {
+                toast::show_message("IPS Watch repaired its database", &msg);
+            }
+            Arc::new(s)
+        }
         Err(e) => {
             win::error_box("IPS Watch", &format!("Could not open the database {}:\n{e:#}", db_path.display()));
             std::process::exit(1);

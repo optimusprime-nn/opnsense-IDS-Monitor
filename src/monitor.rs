@@ -238,6 +238,11 @@ impl Monitor {
                                 info!("pruned {n} events older than {} days", cfg.retention_days);
                             }
                         }
+                        match shared.store.backup_if_due() {
+                            Ok(Some(f)) => info!("database backed up to {}", f.display()),
+                            Ok(None) => {}
+                            Err(e) => error!("database backup failed: {e:#}"),
+                        }
                         last_prune = Instant::now();
                     }
                     shared.set_status(|s| {
