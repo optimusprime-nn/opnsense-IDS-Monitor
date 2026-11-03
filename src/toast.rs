@@ -51,6 +51,18 @@ pub fn show(f: &Finding) {
     }
 }
 
+/// A plain notification (not tied to a finding).
+#[cfg(windows)]
+pub fn show_message(title: &str, text: &str) {
+    use tauri_winrt_notification::{Duration, Toast};
+    if let Err(e) = Toast::new(APP_ID).title(title).text1(text).duration(Duration::Long).show() {
+        log::error!("desktop notification failed: {e:?}");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn show_message(_title: &str, _text: &str) {}
+
 #[cfg(not(windows))]
 pub fn register_app_id() {}
 #[cfg(not(windows))]

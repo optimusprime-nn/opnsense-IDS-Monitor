@@ -289,7 +289,7 @@ fn acknowledged_exposure_stays_acknowledged_but_resolved_health_reopens() {
     e.last_seen = "2099-01-01T00:00:00.000000+00:00".into();
     assert_eq!(store.upsert_finding(&e).unwrap().status, "ack");
     // Health: resolved -> comes back -> open again, and re-notifies.
-    let h = health_finding("health:gateway:STARLINK", "health");
+    let h = health_finding("health:gateway:WAN_GW", "health");
     store.upsert_finding(&h).unwrap();
     store.set_notified(&h.key, &ipswatch::now_iso(), Severity::Low).unwrap();
     store.set_status(&h.key, "resolved").unwrap();
@@ -353,4 +353,43 @@ fn ips_findings_from_crowdsec_banned_ips_are_boosted() {
     let f = store.get_finding("inbound:194.195.208.213").unwrap().unwrap();
     assert_eq!(f.score, plain + 20);
     assert!(f.reasons.iter().any(|r| r.contains("CrowdSec has banned this IP") && r.contains("Akamai")), "{:?}", f.reasons);
+}
+
+#[test]
+fn damaged_database_is_rebuilt_from_backup_and_salvage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ipswatch.db");
+    {
+        let store = Store::open(&path).unwrap();
+        let evs: Vec<Event> =
+            (0..3000).filter_map(|i| normalize(&eve("198.51.100.9", "192.168.1.10", 443, "ET SCAN padding padding padding", 1, 2, "Misc", "allowed", i))).collect();
+        store.add_events(&evs, "api").unwrap();
+        store.upsert_finding(&health_finding("exposure:192.168.1.60:443", "exposure")).unwrap();
+        store.set_kv("api_cursor", "2026-10-19T12:00:00").unwrap();
+        // Daily backup: written once, not again the same day.
+        let b = store.backup_if_due().unwrap().expect("first backup of the day");
+        assert!(b.exists());
+        assert!(store.backup_if_due().unwrap().is_none());
+        store.set_kv("after_backup", "1").unwrap();
+    } // closing checkpoints the WAL into the main file
+
+    // A healthy database opens without repair.
+    assert!(Store::open_or_repair(&path).unwrap().1.is_none());
+
+    // Damage a run of pages in the middle of the file.
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() > 40 * 4096, "test database too small to damage");
+    for b in &mut bytes[20 * 4096..30 * 4096] {
+        *b = 0xA5;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (store, msg) = Store::open_or_repair(&path).unwrap();
+    let msg = msg.expect("repair should have happened");
+    assert!(msg.contains("backup ipswatch-"), "{msg}");
+    assert!(dir.path().read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("damaged-")));
+    // Everything from the backup is back; the cursor is cleared so alerts are downloaded again.
+    assert_eq!(store.event_count_since("2000-01-01").unwrap(), 3000);
+    assert!(store.get_finding("exposure:192.168.1.60:443").unwrap().is_some());
+    assert!(store.get_kv("api_cursor").unwrap().is_none());
 }

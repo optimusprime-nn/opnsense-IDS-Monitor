@@ -88,6 +88,24 @@ enum Cmd {
         /// Query parameters as key=value
         params: Vec<String>,
     },
+    /// Add or remove blocklist URLs on the Technitium DNS servers (keeps other lists) and download them.
+    /// Without --yes: dry run. Needs a token allowed to modify Settings.
+    DnsBlocklists {
+        /// Only this server (name or address); default: all configured
+        #[arg(long)]
+        server: Option<String>,
+        /// Blocklist URL to add (repeatable)
+        #[arg(long = "add", required_unless_present_any = ["remove", "verify"])]
+        add: Vec<String>,
+        /// Blocklist URL to remove (repeatable)
+        #[arg(long = "remove")]
+        remove: Vec<String>,
+        /// Check the configured lists: loaded, and listed domains that resolve publicly are blocked here
+        #[arg(long, conflicts_with_all = ["add", "remove"])]
+        verify: bool,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Disable the Suricata rulesets listed in a file (one filename per line, # comments ok) with
     /// a single reload. Without --yes: dry run. Logs to rulesets-change.log next to the config.
     IpsRulesets {
@@ -95,6 +113,12 @@ enum Cmd {
         disable_from: PathBuf,
         #[arg(long)]
         yes: bool,
+        /// Retry a failed run this many more times (safe: already-disabled rulesets are skipped)
+        #[arg(long, default_value_t = 0)]
+        retries: u32,
+        /// Seconds to wait between retries
+        #[arg(long, default_value_t = 300)]
+        retry_wait: u64,
     },
     /// Recompute all findings from stored events with the current rules (keeps your ack/false-positive marks)
     Rescore,
@@ -139,7 +163,113 @@ fn print_findings(store: &Store, all: bool, min: Severity, limit: usize) -> Resu
     Ok(())
 }
 
+/// For each server: lists configured and loaded, then up to 3 domains per list that resolve via
+/// 1.1.1.1 must be blocked by the server (port 53), and a normal name must still resolve.
+fn verify_blocklists(cfg: &config::Config, servers: &[&config::DnsServerCfg]) -> Result<()> {
+    use ipswatch::dns::{fetch_blocklist, mask_url, query, Technitium};
+    use std::collections::HashMap;
+    let to = std::time::Duration::from_secs(3);
+    let mut samples: HashMap<String, Result<(usize, Vec<String>), String>> = HashMap::new();
+    let mut failures = 0;
+    for srv in servers {
+        let t = Technitium::new(srv, cfg.dns.timeout_seconds)?;
+        let set = t.get("settings/get", &[])?;
+        let stats = t.get("dashboard/stats/get", &[("type", "LastHour")])?;
+        let urls: Vec<String> = set.get("blockListUrls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let s = |k: &str| set.get(k).map(|v| v.to_string()).unwrap_or_default();
+        println!("{} ({}): blocking {} · type {} · {} list(s) · {} blocklist domains loaded · next update {}",
+            srv.label(), srv.host(), s("enableBlocking"), s("blockingType"), urls.len(),
+            stats.pointer("/stats/blockListZones").map(|v| v.to_string()).unwrap_or("?".into()), s("blockListNextUpdatedOn"));
+        if urls.is_empty() {
+            failures += 1;
+            println!("  FAIL: no blocklist URLs saved");
+        }
+        for url in &urls {
+            let entry = samples.entry(url.clone()).or_insert_with(|| {
+                fetch_blocklist(url).map_err(|e| format!("{e:#}")).map(|names| {
+                    // Listed names that really resolve publicly, so NXDOMAIN here can only mean "blocked".
+                    let live: Vec<String> = names.iter().take(400).filter(|d| query("1.1.1.1", d, to).ok).take(3).cloned().collect();
+                    (names.len(), live)
+                })
+            });
+            match entry {
+                Err(e) => {
+                    failures += 1;
+                    println!("  FAIL {e}");
+                }
+                Ok((n, live)) => {
+                    println!("  list {} - {n} domains, {} sampled that resolve publicly", mask_url(url), live.len());
+                    for d in live.iter() {
+                        let l = query(&srv.host(), d, to);
+                        let blocked = l.result == "NXDOMAIN" || (l.result == "NOERROR" && l.answers == 0);
+                        failures += usize::from(!blocked);
+                        println!("    {} {d}: {} here (1.1.1.1 answers it)", if blocked { "BLOCKED" } else { "NOT BLOCKED" }, l.result);
+                    }
+                }
+            }
+        }
+        for d in cfg.dns.test_domains.iter().filter(|d| !d.trim().is_empty()) {
+            let l = query(&srv.host(), d.trim(), to);
+            failures += usize::from(!l.ok);
+            println!("  normal lookup {}: {} ({} answers)", d.trim(), l.result, l.answers);
+        }
+    }
+    println!("
+{}", if failures == 0 { "VERIFIED: blocklists loaded and blocking on every server".to_string() } else { format!("{failures} check(s) failed") });
+    Ok(())
+}
+
+fn ips_rulesets(cfg: &config::Config, disable_from: &std::path::Path, yes: bool, retries: u32, retry_wait: u64) -> Result<()> {
+    let text = std::fs::read_to_string(disable_from).with_context(|| format!("reading {}", disable_from.display()))?;
+    let files: Vec<String> = text
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    log::info!("Ruleset change from {} ({} rulesets, {})", disable_from.display(), files.len(), if yes { "APPLY" } else { "dry run" });
+    let attempts = if yes { retries + 1 } else { 1 };
+    for attempt in 1..=attempts {
+        if attempts > 1 {
+            log::info!("Attempt {attempt} of {attempts}");
+        }
+        let result = (|| -> Result<()> {
+            let a = OPNsense::new(&cfg.opnsense)?;
+            let plan = ipswatch::ipspolicy::plan_disable(&a, &files)?;
+            println!("{}", plan.render());
+            if yes {
+                println!("
+{}", ipswatch::ipspolicy::apply_disable(&a, &plan)?);
+            } else {
+                println!("
+DRY RUN - nothing was changed. Apply with --yes.");
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < attempts => {
+                log::error!("Ruleset change failed (attempt {attempt} of {attempts}): {e:#}; retrying in {retry_wait} s");
+                std::thread::sleep(std::time::Duration::from_secs(retry_wait));
+            }
+            Err(e) => {
+                log::error!("Ruleset change failed: {e:#}");
+                return Err(e);
+            }
+        }
+    }
+    unreachable!()
+}
+
 fn main() -> Result<()> {
+    let result = run();
+    // Scheduled runs have no console: make sure a failure is in the log file.
+    if let Err(e) = &result {
+        log::error!("ipswatch-cli failed: {e:#}");
+    }
+    result
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let log_file = match &cli.cmd {
         Cmd::IpsRulesets { .. } => Some(cli.config.clone().unwrap_or_else(config::default_config_path).with_file_name("rulesets-change.log")),
@@ -148,6 +278,10 @@ fn main() -> Result<()> {
     logbuf::init(log_file, true);
     let cfg_path = cli.config.unwrap_or_else(config::default_config_path);
     let cfg = config::load(&cfg_path)?;
+    // Needs only the firewall API, not the database (which the GUI may be writing).
+    if let Cmd::IpsRulesets { disable_from, yes, retries, retry_wait } = &cli.cmd {
+        return ips_rulesets(&cfg, disable_from, *yes, *retries, *retry_wait);
+    }
     let store = Arc::new(Store::open(&cfg.db_path_for(&cfg_path))?);
     let api = || -> Result<OPNsense> { OPNsense::new(&cfg.opnsense) };
 
@@ -197,29 +331,7 @@ fn main() -> Result<()> {
         Cmd::Fp { key } => store.set_status(&key, "false_positive")?,
         Cmd::Reopen { key } => store.set_status(&key, "open")?,
         Cmd::Report { out } => println!("wrote {} ({} findings)", out.display(), report::write_html(&store, &out)?),
-        Cmd::IpsRulesets { disable_from, yes } => {
-            let text = std::fs::read_to_string(&disable_from).with_context(|| format!("reading {}", disable_from.display()))?;
-            let files: Vec<String> = text
-                .lines()
-                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            log::info!("Ruleset change from {} ({} rulesets, {})", disable_from.display(), files.len(), if yes { "APPLY" } else { "dry run" });
-            let a = api()?;
-            let plan = ipswatch::ipspolicy::plan_disable(&a, &files)?;
-            println!("{}", plan.render());
-            if yes {
-                match ipswatch::ipspolicy::apply_disable(&a, &plan) {
-                    Ok(msg) => println!("\n{msg}"),
-                    Err(e) => {
-                        log::error!("Ruleset change failed: {e:#}");
-                        return Err(e);
-                    }
-                }
-            } else {
-                println!("\nDRY RUN - nothing was changed. Apply with --yes.");
-            }
-        }
+        Cmd::IpsRulesets { .. } => unreachable!("handled before the database is opened"),
         Cmd::IpsPolicy { apply, remove, yes } => {
             let a = api()?;
             if remove {
@@ -334,6 +446,43 @@ fn main() -> Result<()> {
                 println!("  {:<8} {}", f.severity.as_str().to_uppercase(), f.title);
                 for r in &f.reasons {
                     println!("             - {r}");
+                }
+            }
+        }
+        Cmd::DnsBlocklists { server, add, remove, verify, yes } => {
+            let servers: Vec<_> = cfg.dns.servers.iter().filter(|s| server.as_ref().is_none_or(|n| s.label() == *n || s.host() == *n)).collect();
+            anyhow::ensure!(!servers.is_empty(), "no matching DNS server in the config");
+            if verify {
+                return verify_blocklists(&cfg, &servers);
+            }
+            for srv in servers {
+                let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?;
+                let set = t.get("settings/get", &[])?;
+                let mut urls: Vec<String> = set.get("blockListUrls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                let old = urls.clone();
+                let before = urls.len();
+                urls.retain(|u| !remove.contains(u));
+                for u in &add {
+                    if !urls.iter().any(|x| x == u) {
+                        urls.push(u.clone());
+                    }
+                }
+                let shown = |v: &[String]| v.iter().map(|u| ipswatch::dns::mask_url(u)).collect::<Vec<_>>().join(", ");
+                println!("{}: {} list(s) now, {} after: {}", srv.label(), before, urls.len(), shown(&urls));
+                if urls == old {
+                    println!("  nothing to add");
+                } else if yes {
+                    // Technitium clears the list when given "false".
+                    let value = if urls.is_empty() { "false".to_string() } else { urls.join(",") };
+                    t.get("settings/set", &[("blockListUrls", &value)])?;
+                    println!("  saved");
+                } else {
+                    println!("  DRY RUN - add --yes to save");
+                    continue;
+                }
+                if yes && !urls.is_empty() {
+                    t.get("settings/forceUpdateBlockLists", &[])?;
+                    println!("  blocklist download started");
                 }
             }
         }

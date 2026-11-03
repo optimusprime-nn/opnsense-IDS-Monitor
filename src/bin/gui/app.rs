@@ -168,6 +168,8 @@ pub struct App {
     /// Drop-policy preview window: None = closed; Some(None) = loading.
     policy: Option<Option<Result<ipswatch::ipspolicy::Plan, String>>>,
     policy_busy: bool,
+    monitor_panics_seen: u32,
+    monitor_restarts: Vec<Instant>,
     f_kind: KindFilter,
     health_busy: bool,
     dns_busy: bool,
@@ -232,6 +234,8 @@ impl App {
             rescoring: false,
             policy: None,
             policy_busy: false,
+            monitor_panics_seen: 0,
+            monitor_restarts: Vec::new(),
             f_kind: KindFilter::All,
             health_busy: false,
             dns_busy: false,
@@ -564,7 +568,7 @@ impl App {
             let r = OPNsense::new(&cfg.opnsense).and_then(|api| ipswatch::health::run(&cfg, &shared.store, &api));
             match r {
                 Ok((snap, alerts)) => {
-                    *shared.health.lock().unwrap_or_else(|e| e.into_inner()) = Some(snap);
+                    shared.set_health(snap);
                     for f in &alerts {
                         (shared.on_alert)(&shared, f);
                     }
@@ -1340,6 +1344,20 @@ impl eframe::App for App {
         if self.titlebar_dark != Some(dark) {
             crate::win::set_dark_titlebar(self.ctl.hwnd.load(Ordering::Relaxed), dark);
             self.titlebar_dark = Some(dark);
+        }
+
+        // Monitoring thread died from a panic: log it and start it again (bounded).
+        let panics = ipswatch::monitor::MONITOR_PANICS.load(Ordering::Relaxed);
+        if panics != self.monitor_panics_seen && !self.ctl.is_running() {
+            self.monitor_panics_seen = panics;
+            self.monitor_restarts.retain(|t| t.elapsed() < Duration::from_secs(3600));
+            if self.monitor_restarts.len() < 5 {
+                self.monitor_restarts.push(Instant::now());
+                log::warn!("Monitoring stopped after an internal error (see crash.log); restarting it");
+                self.ctl.start();
+            } else {
+                log::error!("Monitoring keeps failing (5 restarts in the last hour); left stopped - see crash.log");
+            }
         }
 
         while let Ok(m) = self.bg_rx.try_recv() {

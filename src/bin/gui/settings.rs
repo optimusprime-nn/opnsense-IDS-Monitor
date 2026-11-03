@@ -483,7 +483,7 @@ impl SettingsForm {
             row(ui, "Gateway packet loss alert (%)", "", |ui| {
                 ui.add(DragValue::new(&mut h.gateway_loss_pct).range(1.0..=100.0).speed(1.0));
             });
-            row(ui, "Gateway latency alert (ms)", "Starlink is typically 30-80 ms", |ui| {
+            row(ui, "Gateway latency alert (ms)", "Satellite links are typically 30-80 ms", |ui| {
                 ui.add(DragValue::new(&mut h.gateway_delay_ms).range(20.0..=5000.0).speed(5.0));
             });
             row(ui, "Unreachable alert after (minutes)", "When IPS Watch can't reach the firewall API", |ui| num(ui, &mut h.offline_minutes, 1..=1440));
@@ -538,7 +538,7 @@ impl SettingsForm {
                             remove = Some(i);
                         }
                     });
-                    row(ui, "Web console URL", "e.g. http://192.168.1.99:5380 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
+                    row(ui, "Web console URL", "e.g. http://192.168.1.53:5380 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
                     row(ui, "API token", "Technitium: Administration > Sessions > Create Token (a read-only user is enough)", |ui| {
                         ui.add(TextEdit::singleline(&mut srv.token).password(!show).desired_width(360.0));
                     });

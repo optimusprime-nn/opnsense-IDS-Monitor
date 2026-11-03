@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::config::Severity;
@@ -66,6 +66,101 @@ impl Finding {
 
 pub struct Store {
     db: Mutex<Connection>,
+    path: PathBuf,
+}
+
+/// Daily backups kept in `backups\` next to the database.
+pub const BACKUPS_KEPT: usize = 7;
+const TABLES: [&str; 4] = ["events", "findings", "kv", "devices"];
+
+/// True for errors that mean the database file itself is damaged.
+fn is_corrupt(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    s.contains("malformed") || s.contains("not a database") || s.contains("integrity check failed")
+}
+
+fn quick_check(db: &Connection) -> Result<()> {
+    let r: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    anyhow::ensure!(r == "ok", "integrity check failed: {r}");
+    Ok(())
+}
+
+fn backup_dir(db_path: &Path) -> PathBuf {
+    db_path.with_file_name("backups")
+}
+
+/// Backup files, oldest first (names sort by date).
+fn list_backups(db_path: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(backup_dir(db_path))
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "db")).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Copy every row that can still be read from a damaged database into `dst`.
+/// Rows are looked up one rowid at a time so a damaged page only loses the rows on it.
+/// Findings and settings from the damaged file win over the backup (they are newer).
+fn salvage_into(damaged: &Path, dst: &Connection) -> Result<usize> {
+    let src = Connection::open(damaged)?;
+    let mut total = 0;
+    for t in TABLES {
+        let cols: Vec<String> =
+            dst.prepare(&format!("PRAGMA table_info({t})"))?.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
+        let list = cols.join(", ");
+        let Ok(mut get) = src.prepare(&format!("SELECT {list} FROM {t} WHERE rowid = ?1")) else { continue };
+        let verb = if t == "findings" || t == "kv" { "INSERT OR REPLACE" } else { "INSERT OR IGNORE" };
+        let marks = vec!["?"; cols.len()].join(",");
+        let mut put = dst.prepare(&format!("{verb} INTO {t} ({list}) VALUES ({marks})"))?;
+        let (mut rid, mut last_hit) = (1i64, 0i64);
+        while rid <= last_hit + 100_000 {
+            let row = get
+                .query_row([rid], |r| (0..cols.len()).map(|i| r.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>())
+                .optional();
+            if let Ok(Some(vals)) = row {
+                total += put.execute(params_from_iter(vals))?;
+                last_hit = rid;
+            }
+            rid += 1;
+        }
+    }
+    Ok(total)
+}
+
+/// Set the damaged files aside, then rebuild from the newest good backup plus every row still
+/// readable in the damaged file. Returns a description of what was done.
+fn repair(path: &Path) -> Result<String> {
+    let aside = path.with_file_name(format!("damaged-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+    std::fs::create_dir_all(&aside)?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("ipswatch.db").to_string();
+    for suffix in ["", "-wal", "-shm"] {
+        let f = path.with_file_name(format!("{name}{suffix}"));
+        if f.exists() {
+            std::fs::rename(&f, aside.join(format!("{name}{suffix}")))?;
+        }
+    }
+    let backup = list_backups(path).pop();
+    if let Some(b) = &backup {
+        std::fs::copy(b, path)?;
+    }
+    let dst = Connection::open(path)?;
+    dst.execute_batch(SCHEMA)?;
+    let salvaged = salvage_into(&aside.join(&name), &dst).unwrap_or_else(|e| {
+        log::error!("salvaging the damaged database failed: {e:#}");
+        0
+    });
+    // Download the alert history the firewall still has again (duplicates are ignored).
+    dst.execute("DELETE FROM kv WHERE k = 'api_cursor'", [])?;
+    quick_check(&dst)?;
+    let from = match &backup {
+        Some(b) => format!("backup {}", b.file_name().unwrap_or_default().to_string_lossy()),
+        None => "scratch (no backup yet)".into(),
+    };
+    Ok(format!(
+        "The database was damaged and has been rebuilt from {from} plus {salvaged} rows still readable in it. \
+         Recent alerts are downloaded again from the firewall. The damaged files are kept in {}.",
+        aside.display()
+    ))
 }
 
 fn finding_from_row(r: &Row) -> rusqlite::Result<Finding> {
@@ -134,15 +229,62 @@ impl Store {
             std::fs::create_dir_all(dir)?;
         }
         let db = Connection::open(path)?;
+        // Wait for other writers (the desktop app and CLI share this file) before anything else,
+        // so opening never fails just because the other one is mid-write.
+        db.busy_timeout(std::time::Duration::from_secs(30))?;
         db.pragma_update(None, "journal_mode", "WAL")?;
-        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(SCHEMA)?;
         // v0.2 stored API events (which never carry a severity) as severity 3; mark them unknown.
         if db.query_row("SELECT v FROM kv WHERE k = 'migr_api_sev'", [], |r| r.get::<_, String>(0)).optional()?.is_none() {
             db.execute("UPDATE events SET severity = 0 WHERE source = 'api' AND severity = 3", [])?;
             db.execute("INSERT OR REPLACE INTO kv (k, v) VALUES ('migr_api_sev', '1')", [])?;
         }
-        Ok(Store { db: Mutex::new(db) })
+        Ok(Store { db: Mutex::new(db), path: path.to_path_buf() })
+    }
+
+    /// Open the database, checking it first. If it is damaged, set it aside, rebuild it (newest
+    /// backup + whatever is still readable) and open that. The message says what was repaired.
+    /// Only the desktop app should use this: it moves files another process may have open.
+    pub fn open_or_repair(path: &Path) -> Result<(Store, Option<String>)> {
+        let opened = Store::open(path).and_then(|s| {
+            quick_check(&s.conn())?;
+            Ok(s)
+        });
+        match opened {
+            Ok(s) => Ok((s, None)),
+            Err(e) if is_corrupt(&e) => {
+                log::error!("Database {} is damaged ({e:#}); rebuilding it", path.display());
+                let msg = repair(path)?;
+                log::warn!("{msg}");
+                Ok((Store::open(path)?, Some(msg)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Once a day: check the database and write a compact copy to `backups\ipswatch-YYYYMMDD.db`,
+    /// keeping the newest BACKUPS_KEPT. A damaged database is never backed up, so bad copies
+    /// never push out good ones. Returns the new file when one was written.
+    pub fn backup_if_due(&self) -> Result<Option<PathBuf>> {
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+        if self.get_kv("last_db_backup")?.as_deref() == Some(today.as_str()) {
+            return Ok(None);
+        }
+        let dir = backup_dir(&self.path);
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join(format!("ipswatch-{today}.db"));
+        {
+            let db = self.conn();
+            quick_check(&db)?;
+            let _ = std::fs::remove_file(&file);
+            db.execute("VACUUM INTO ?1", [file.to_string_lossy()])?;
+        }
+        let all = list_backups(&self.path);
+        for old in all.iter().take(all.len().saturating_sub(BACKUPS_KEPT)) {
+            let _ = std::fs::remove_file(old);
+        }
+        self.set_kv("last_db_backup", &today)?;
+        Ok(Some(file))
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
