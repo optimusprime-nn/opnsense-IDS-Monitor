@@ -618,11 +618,13 @@ mod tests {
         c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.53:5380".into(), token: "t0kenvalue".into() });
         save(&c, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
+        // Secrets are DPAPI-encrypted on Windows; other platforms store them as written.
         #[cfg(windows)]
-        assert!(text.contains("dpapi:"), "secret should be encrypted on disk");
-        assert!(!text.contains("s3cr"));
-        #[cfg(windows)]
-        assert!(!text.contains("t0ken"));
+        {
+            assert!(text.contains("dpapi:"), "secret should be encrypted on disk");
+            assert!(!text.contains("s3cr"));
+            assert!(!text.contains("t0ken"));
+        }
         assert_eq!(load(&p).unwrap(), c);
     }
 
