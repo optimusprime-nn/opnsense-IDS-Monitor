@@ -150,7 +150,7 @@ fn repair(path: &Path) -> Result<String> {
         0
     });
     // Download the alert history the firewall still has again (duplicates are ignored).
-    dst.execute("DELETE FROM kv WHERE k = 'api_cursor'", [])?;
+    dst.execute("DELETE FROM kv WHERE k IN ('api_cursor', 'api_backlog')", [])?;
     quick_check(&dst)?;
     let from = match &backup {
         Some(b) => format!("backup {}", b.file_name().unwrap_or_default().to_string_lossy()),
@@ -518,5 +518,28 @@ impl Store {
     pub fn set_kv(&self, k: &str, v: &str) -> Result<()> {
         self.conn().execute("INSERT OR REPLACE INTO kv (k, v) VALUES (?1, ?2)", params![k, v])?;
         Ok(())
+    }
+
+    pub fn delete_kv(&self, k: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM kv WHERE k = ?1", [k])?;
+        Ok(())
+    }
+
+    /// Whether the firewall API itself (not syslog or an imported file) reported an alert from
+    /// `ip` at or after `since`. Automatic blocking requires this.
+    pub fn has_api_event_from(&self, ip: &str, since: &str) -> Result<bool> {
+        Ok(self
+            .conn()
+            .query_row("SELECT 1 FROM events WHERE src_ip = ?1 AND ts >= ?2 AND source = 'api' LIMIT 1", params![ip, since], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// Keep at most `max` events (the newest). Returns how many were deleted.
+    pub fn cap_events(&self, max: u64) -> Result<usize> {
+        Ok(self.conn().execute(
+            "DELETE FROM events WHERE ts < (SELECT ts FROM events ORDER BY ts DESC LIMIT 1 OFFSET ?1)",
+            [max.max(1) as i64 - 1],
+        )?)
     }
 }

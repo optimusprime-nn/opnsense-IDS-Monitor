@@ -10,10 +10,10 @@ Set-Location $PSScriptRoot
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
 $env:RUSTFLAGS = "--remap-path-prefix=$PSScriptRoot=ipswatch --remap-path-prefix=$cargoHome=cargo --remap-path-prefix=$env:USERPROFILE=~"
 
-cargo test --release
+cargo test --release --locked
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 
-cargo build --release
+cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 New-Item -ItemType Directory -Force dist | Out-Null

@@ -1,4 +1,6 @@
 # Linux service for the command-line build (cargo build --release --bin ipswatch-cli).
+# /opt/ipswatch should hold only the config and database (owned by ipswatch, mode 0700); in
+# production put the binary where the ipswatch user cannot write, e.g. /usr/local/bin.
 [Unit]
 Description=ipswatch - OPNsense IPS monitor
 After=network-online.target
@@ -12,6 +14,8 @@ ExecStart=/opt/ipswatch/ipswatch-cli -c /opt/ipswatch/config.toml run
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
+# Outside Windows secrets are stored as written: keep every file the service creates private.
+UMask=0077
 ProtectSystem=strict
 ReadWritePaths=/opt/ipswatch
 PrivateTmp=true

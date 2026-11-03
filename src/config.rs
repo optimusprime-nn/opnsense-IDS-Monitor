@@ -60,6 +60,8 @@ pub struct OpnsenseCfg {
     pub page_size: u32,
     pub max_pages: u32,
     pub timeout_seconds: u64,
+    /// Allow an http:// firewall URL. The API key and secret then cross the network unencrypted.
+    pub allow_http: bool,
 }
 
 impl Default for OpnsenseCfg {
@@ -73,6 +75,7 @@ impl Default for OpnsenseCfg {
             page_size: 500,
             max_pages: 20,
             timeout_seconds: 30,
+            allow_http: false,
         }
     }
 }
@@ -84,11 +87,13 @@ pub struct SyslogCfg {
     pub bind: String,
     pub port: u16,
     pub protocol: String, // udp | tcp
+    /// Addresses/networks allowed to send syslog. Empty: the firewall's own address (from its URL).
+    pub allowed_senders: Vec<String>,
 }
 
 impl Default for SyslogCfg {
     fn default() -> Self {
-        Self { enabled: false, bind: "0.0.0.0".into(), port: 5514, protocol: "udp".into() }
+        Self { enabled: false, bind: "0.0.0.0".into(), port: 5514, protocol: "udp".into(), allowed_senders: vec![] }
     }
 }
 
@@ -464,6 +469,8 @@ pub struct DnsCfg {
     /// NXDOMAIN answers to one client in one check interval (needs a query-log app).
     pub nxdomain_burst: u64,
     pub change_alerts: bool,
+    /// Allow http:// console URLs. The API token then crosses the network unencrypted.
+    pub allow_http: bool,
 }
 
 impl Default for DnsCfg {
@@ -480,6 +487,7 @@ impl Default for DnsCfg {
             client_spike_factor: 5.0,
             nxdomain_burst: 200,
             change_alerts: true,
+            allow_http: false,
         }
     }
 }
@@ -490,6 +498,8 @@ pub struct Config {
     pub db_path: String,
     pub poll_seconds: u64,
     pub retention_days: u32,
+    /// Most events kept, whatever their age (the oldest go first).
+    pub max_events: u64,
     pub opnsense: OpnsenseCfg,
     pub syslog: SyslogCfg,
     pub detect: DetectCfg,
@@ -509,6 +519,7 @@ impl Default for Config {
             db_path: "ipswatch.db".into(),
             poll_seconds: 60,
             retention_days: 30,
+            max_events: 1_000_000,
             opnsense: Default::default(),
             syslog: Default::default(),
             detect: Default::default(),
@@ -532,11 +543,16 @@ impl Config {
         if self.poll_seconds < 10 {
             bail!("Poll interval must be at least 10 seconds");
         }
-        if !self.opnsense.url.is_empty()
-            && !(self.opnsense.url.starts_with("https://") || self.opnsense.url.starts_with("http://"))
-        {
-            bail!("Firewall URL must start with https:// (or http://)");
+        let url = self.opnsense.url.trim();
+        if !url.is_empty() && !url.starts_with("https://") {
+            if !url.starts_with("http://") {
+                bail!("Firewall URL must start with https://");
+            }
+            if !self.opnsense.allow_http {
+                bail!("Firewall URL uses http://, which sends the API key and secret unencrypted. Use https://                        (or turn on 'Allow unencrypted HTTP' for the firewall if you accept that risk)");
+            }
         }
+        parse_nets(&self.syslog.allowed_senders).context("Syslog allowed senders")?;
         if !matches!(self.syslog.protocol.as_str(), "udp" | "tcp") {
             bail!("Syslog protocol must be udp or tcp");
         }
@@ -548,10 +564,27 @@ impl Config {
         }
         for d in &self.dns.servers {
             if !(d.url.starts_with("http://") || d.url.starts_with("https://")) || d.host().is_empty() {
-                bail!("DNS server '{}': console URL must look like http://192.168.1.53:5380", d.label());
+                bail!("DNS server '{}': console URL must look like https://192.168.1.53:53443", d.label());
+            }
+            if d.url.starts_with("http://") && !self.dns.allow_http {
+                bail!("DNS server '{}': http:// sends the API token unencrypted. Use the HTTPS console                        (https://...:53443) or turn on 'Allow unencrypted HTTP' for DNS if you accept that risk", d.label());
             }
         }
         Ok(())
+    }
+
+    /// Who may send syslog: the configured list, or else the firewall's address from its URL.
+    pub fn syslog_senders(&self) -> Result<Vec<IpNet>> {
+        let listed = parse_nets(&self.syslog.allowed_senders)?;
+        if !listed.is_empty() {
+            return Ok(listed);
+        }
+        let host = DnsServerCfg { url: self.opnsense.url.clone(), ..Default::default() }.host();
+        if host.is_empty() {
+            return Ok(vec![]);
+        }
+        use std::net::ToSocketAddrs;
+        Ok((host.as_str(), 443).to_socket_addrs().map(|it| it.map(|a| IpNet::from(a.ip())).collect()).unwrap_or_default())
     }
 
     /// Database path; relative paths are resolved against the config file's folder.
@@ -590,16 +623,57 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     }
     let body = toml::to_string_pretty(&out)?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        create_private_dir(dir)?;
     }
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, format!("# ipswatch configuration (written by IPS Watch {})\n{body}", crate::VERSION))?;
+    let _ = std::fs::remove_file(&tmp);
+    {
+        use std::io::Write;
+        let mut f = private_file(&tmp)?;
+        f.write_all(format!("# ipswatch configuration (written by IPS Watch {})\n{body}", crate::VERSION).as_bytes())?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
+/// Create the config folder. Outside Windows secrets are stored as written, so a new folder is
+/// private to its owner (0700). Windows keeps the per-user %APPDATA% permissions.
+fn create_private_dir(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if !dir.exists() {
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
+    Ok(())
+}
+
+/// A new file only its owner can read: created as 0600 on Unix, so it is never briefly exposed
+/// and replacing the config never loosens its permissions.
+fn private_file(path: &Path) -> Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path).with_context(|| format!("creating {}", path.display()))
+}
+
 fn secrets_mut(cfg: &mut Config) -> Vec<&mut String> {
-    let mut v = vec![&mut cfg.opnsense.api_key, &mut cfg.opnsense.api_secret, &mut cfg.notify.smtp_password];
+    // Webhook and ntfy URLs usually carry their own access token, so they are secrets too.
+    let mut v = vec![
+        &mut cfg.opnsense.api_key,
+        &mut cfg.opnsense.api_secret,
+        &mut cfg.notify.smtp_password,
+        &mut cfg.notify.webhook_url,
+        &mut cfg.notify.ntfy_url,
+    ];
     v.extend(cfg.dns.servers.iter_mut().map(|d| &mut d.token));
     v
 }
@@ -618,12 +692,42 @@ mod tests {
         c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.53:5380".into(), token: "t0kenvalue".into() });
         save(&c, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
+        // Secrets are DPAPI-encrypted on Windows; other platforms store them as written.
         #[cfg(windows)]
-        assert!(text.contains("dpapi:"), "secret should be encrypted on disk");
-        assert!(!text.contains("s3cr"));
-        #[cfg(windows)]
-        assert!(!text.contains("t0ken"));
+        {
+            assert!(text.contains("dpapi:"), "secret should be encrypted on disk");
+            assert!(!text.contains("s3cr"));
+            assert!(!text.contains("t0ken"));
+        }
         assert_eq!(load(&p).unwrap(), c);
+    }
+
+    #[test]
+    fn notification_urls_are_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.toml");
+        let mut c = Config::default();
+        c.notify.webhook_url = "https://hooks.example.com/services/T0/B0/s3cretpath".into();
+        c.notify.ntfy_url = "https://ntfy.example.com/private-topic-s3cret".into();
+        save(&c, &p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        #[cfg(windows)]
+        assert!(!text.contains("s3cret"), "webhook/ntfy URLs should be encrypted on disk");
+        let _ = text;
+        assert_eq!(load(&p).unwrap(), c);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_file_is_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("ipswatch");
+        let p = sub.join("config.toml");
+        save(&Config::default(), &p).unwrap();
+        save(&Config::default(), &p).unwrap(); // replacing keeps it private
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[test]

@@ -159,7 +159,7 @@ fn sample_file_matches_python_results() {
 
 #[test]
 fn syslog_receiver_udp() {
-    let rx = collect::SyslogReceiver::start("127.0.0.1", 55141, "udp").unwrap();
+    let rx = collect::SyslogReceiver::start("127.0.0.1", 55141, "udp", vec!["127.0.0.1/32".parse().unwrap()]).unwrap();
     let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     for i in 0..5 {
         let line = format!("<14>1 2026-10-19T12:00:00Z fw suricata 1 - - {}", eve("203.0.113.1", "192.168.1.2", 22, "ET SCAN", 9, 2, "Misc", "allowed", i));

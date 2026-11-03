@@ -91,6 +91,17 @@ fn email(cfg: &NotifyCfg, subject: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
+/// Webhook and ntfy URLs act as passwords: keep them out of error messages and logs.
+fn redact(cfg: &NotifyCfg, e: anyhow::Error) -> anyhow::Error {
+    let mut s = format!("{e:#}");
+    for u in [&cfg.webhook_url, &cfg.ntfy_url] {
+        if !u.is_empty() {
+            s = s.replace(u.as_str(), &crate::dns::mask_url(u));
+        }
+    }
+    anyhow::anyhow!(s)
+}
+
 /// Send to every configured channel. Returns true if at least one delivered it (or none
 /// is configured), so one broken channel doesn't cause re-sending every cycle.
 pub fn send(f: &Finding, cfg: &NotifyCfg) -> bool {
@@ -105,7 +116,7 @@ pub fn send(f: &Finding, cfg: &NotifyCfg) -> bool {
         configured += 1;
         match r() {
             Ok(()) => ok += 1,
-            Err(e) => error!("notify via {name} failed: {e:#}"),
+            Err(e) => error!("notify via {name} failed: {:#}", redact(cfg, e)),
         }
     };
     attempt("webhook", !cfg.webhook_url.is_empty(), &|| webhook(cfg, f, &subject, &body));
@@ -120,10 +131,10 @@ pub fn send_test(cfg: &NotifyCfg) -> Vec<(String, Result<()>)> {
     let (subject, body) = render(&f);
     let mut out = Vec::new();
     if !cfg.webhook_url.is_empty() {
-        out.push(("Webhook".into(), webhook(cfg, &f, &subject, &body)));
+        out.push(("Webhook".into(), webhook(cfg, &f, &subject, &body).map_err(|e| redact(cfg, e))));
     }
     if !cfg.ntfy_url.is_empty() {
-        out.push(("ntfy".into(), ntfy(cfg, &f, &subject, &body)));
+        out.push(("ntfy".into(), ntfy(cfg, &f, &subject, &body).map_err(|e| redact(cfg, e))));
     }
     if !cfg.smtp_host.is_empty() && !cfg.smtp_to.is_empty() {
         out.push(("Email".into(), email(cfg, &subject, &body)));

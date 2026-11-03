@@ -140,7 +140,12 @@ impl Monitor {
                     }
                 };
                 let syslog = if cfg.syslog.enabled {
-                    match SyslogReceiver::start(&cfg.syslog.bind, cfg.syslog.port, &cfg.syslog.protocol) {
+                    // The firewall's URL address plus its interface addresses (it may log from either).
+                    let mut senders = cfg.syslog_senders().unwrap_or_default();
+                    if cfg.syslog.allowed_senders.is_empty() {
+                        senders.extend(engine::own_addresses(&shared.store).into_iter().map(ipnet::IpNet::from));
+                    }
+                    match SyslogReceiver::start(&cfg.syslog.bind, cfg.syslog.port, &cfg.syslog.protocol, senders) {
                         Ok(s) => Some(s),
                         Err(e) => {
                             error!("could not open syslog port {}/{}: {e}", cfg.syslog.protocol, cfg.syslog.port);
@@ -235,7 +240,7 @@ impl Monitor {
                     if last_prune.elapsed() > Duration::from_secs(3600) {
                         if let Ok(n) = engine::prune(&cfg, &shared.store) {
                             if n > 0 {
-                                info!("pruned {n} events older than {} days", cfg.retention_days);
+                                info!("pruned {n} old events (older than {} days or beyond {} events)", cfg.retention_days, cfg.max_events);
                             }
                         }
                         match shared.store.backup_if_due() {
@@ -248,7 +253,8 @@ impl Monitor {
                     shared.set_status(|s| {
                         s.last_poll = Some(chrono::Local::now().format("%H:%M:%S").to_string());
                         s.last_added = added;
-                        s.last_error = err;
+                        // A collection gap is shown like an error until the history has caught up.
+                        s.last_error = err.or_else(|| collect::collection_gap(&shared.store));
                     });
                     (shared.on_cycle)();
                     match rx.recv_timeout(Duration::from_secs(cfg.poll_seconds.max(10))) {

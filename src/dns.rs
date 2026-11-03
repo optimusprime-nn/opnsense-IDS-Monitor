@@ -149,9 +149,13 @@ pub struct Technitium {
 }
 
 impl Technitium {
-    pub fn new(cfg: &DnsServerCfg, timeout_seconds: u64) -> Result<Self> {
+    /// `allow_http`: accept an http:// console (the token then crosses the network unencrypted).
+    pub fn new(cfg: &DnsServerCfg, timeout_seconds: u64, allow_http: bool) -> Result<Self> {
         if cfg.url.trim().is_empty() {
             bail!("no console URL");
+        }
+        if !cfg.url.trim().starts_with("https://") && !allow_http {
+            bail!("the console URL must use https:// (http:// would send the API token unencrypted;                    allow it under DNS settings if you accept that)");
         }
         let tls = native_tls::TlsConnector::new()?;
         let agent = ureq::AgentBuilder::new()
@@ -171,7 +175,7 @@ impl Technitium {
         let v: Value = match r.call() {
             Ok(resp) => resp.into_json().with_context(|| format!("{path}: response is not JSON"))?,
             Err(ureq::Error::Status(code, _)) => bail!("{path}: HTTP {code}"),
-            Err(ureq::Error::Transport(t)) => bail!("{path}: {}", t.to_string().replace(&self.token, "***")),
+            Err(ureq::Error::Transport(t)) => bail!("{path}: {}", self.redact(&t.to_string())),
         };
         match v.get("status").and_then(Value::as_str) {
             Some("ok") => Ok(v.get("response").cloned().unwrap_or(Value::Null)),
@@ -183,6 +187,21 @@ impl Technitium {
 }
 
 impl Technitium {
+    /// Remove the token from text that may contain the request URL.
+    fn redact(&self, text: &str) -> String {
+        let mut s = if self.token.is_empty() { text.to_string() } else { text.replace(&self.token, "***") };
+        // Also a URL-encoded or otherwise rewritten copy: mask whatever follows "token=".
+        let mut from = 0;
+        while let Some(i) = s[from..].find("token=").map(|i| i + from + 6) {
+            let end = s[i..].find(|c: char| c == '&' || c.is_whitespace() || c == '"' || c == ')').map_or(s.len(), |e| i + e);
+            if &s[i..end] != "***" {
+                s.replace_range(i..end, "***");
+            }
+            from = i + 3;
+        }
+        s
+    }
+
     /// GET /api/<path> returning plain text (e.g. logs/download).
     pub fn get_text(&self, path: &str, query: &[(&str, &str)]) -> Result<String> {
         let url = format!("{}/api/{}", self.base, path.trim_start_matches('/'));
@@ -193,7 +212,7 @@ impl Technitium {
         match r.call() {
             Ok(resp) => Ok(resp.into_string()?),
             Err(ureq::Error::Status(code, _)) => bail!("{path}: HTTP {code}"),
-            Err(ureq::Error::Transport(t)) => bail!("{path}: {}", t.to_string().replace(&self.token, "***")),
+            Err(ureq::Error::Transport(t)) => bail!("{path}: {}", self.redact(&t.to_string())),
         }
     }
 }
@@ -528,7 +547,7 @@ fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exp
         });
     }
 
-    let api = match Technitium::new(srv, d.timeout_seconds) {
+    let api = match Technitium::new(srv, d.timeout_seconds, d.allow_http) {
         Ok(a) if !srv.token.trim().is_empty() => a,
         Ok(_) => {
             st.api_error = "no API token configured".into();
@@ -992,7 +1011,7 @@ pub fn test(cfg: &Config) -> (String, bool) {
         let api = if srv.token.trim().is_empty() {
             Err(anyhow!("no API token entered"))
         } else {
-            Technitium::new(srv, cfg.dns.timeout_seconds).and_then(|a| a.get("settings/get", &[]))
+            Technitium::new(srv, cfg.dns.timeout_seconds, cfg.dns.allow_http).and_then(|a| a.get("settings/get", &[]))
         };
         match api {
             Ok(v) => lines.push(format!("  API: OK - Technitium {} ({})", s(&v, "version"), s(&v, "dnsServerDomain"))),
