@@ -1,0 +1,103 @@
+{
+  "unbound": {
+    "acls": {
+      "acl": [],
+      "default_action": {
+        "allow": {"selected": 1, "value": "Allow"},
+        "deny": {"selected": 0, "value": "Deny"},
+        "refuse": {"selected": 0, "value": "Refuse"}
+      }
+    },
+    "advanced": {
+      "extendedstatistics": "0",
+      "logverbosity": [
+        {"selected": 0, "value": "Level 0"},
+        {"selected": 1, "value": "Level 1 (Default)"},
+        {"selected": 0, "value": "Level 2"}
+      ],
+      "prefetch": "1",
+      "privateaddress": {
+        "10.0.0.0/8": {"selected": 1, "value": "10.0.0.0/8"},
+        "192.168.0.0/16": {"selected": 1, "value": "192.168.0.0/16"}
+      }
+    },
+    "dnsbl": {
+      "blocklist": {
+        "4eaac1bd-d2cd-4c74-995f-3f9cd6b01fd2": {
+          "address": "",
+          "allowlists": {"": {"selected": 1, "value": ""}},
+          "blocklists": {"": {"selected": 1, "value": ""}},
+          "cache_ttl": "72000",
+          "description": "default",
+          "enabled": "1",
+          "lists": {"https://lists.example.net/hosts.txt": {"selected": 1, "value": "https://lists.example.net/hosts.txt"}},
+          "nxdomain": "0",
+          "source_nets": {"": {"selected": 1, "value": ""}},
+          "type": {
+            "ag": {"optgroup": "General Blocklists", "selected": 1, "value": "AdGuard List"},
+            "el": {"optgroup": "General Blocklists", "selected": 0, "value": "EasyList"},
+            "hgz011": {"optgroup": "Hagezi Targeted Lists", "selected": 1, "value": "Threat Intelligence Feeds"}
+          },
+          "wildcards": {"": {"selected": 1, "value": ""}}
+        },
+        "9b1f0c2e-0000-4000-8000-000000000001": {
+          "description": "guests (off)",
+          "enabled": "0",
+          "lists": {"": {"selected": 1, "value": ""}},
+          "type": {"oisd1": {"optgroup": "OISD Blocklists", "selected": 1, "value": "Big Blocklist (incl. Ads)"}}
+        }
+      }
+    },
+    "dots": {
+      "dot": {
+        "13045c61-2060-475b-b463-e156cb0e25a9": {
+          "description": "",
+          "domain": "",
+          "enabled": "1",
+          "forward_first": "0",
+          "forward_tcp_upstream": "0",
+          "port": "853",
+          "server": "9.9.9.9",
+          "type": {"dot": {"selected": 1, "value": "DNS over TLS"}, "forward": {"selected": 0, "value": "Forward"}},
+          "verify": "dns.quad9.net"
+        },
+        "22222222-2060-475b-b463-e156cb0e25a9": {
+          "description": "lab",
+          "domain": "lab.example",
+          "enabled": "1",
+          "port": "",
+          "server": "192.168.50.2",
+          "type": {"dot": {"selected": 0, "value": "DNS over TLS"}, "forward": {"selected": 1, "value": "Forward"}}
+        },
+        "33333333-2060-475b-b463-e156cb0e25a9": {
+          "enabled": "0",
+          "server": "1.1.1.1",
+          "type": {"dot": {"selected": 1, "value": "DNS over TLS"}}
+        }
+      }
+    },
+    "forwarding": {"enabled": ""},
+    "general": {
+      "active_interface": {},
+      "dnssec": "1",
+      "enabled": "1",
+      "local_zone_type": {
+        "transparent": {"selected": 1, "value": "transparent"},
+        "static": {"selected": 0, "value": "static"}
+      },
+      "port": "53",
+      "stats": "1"
+    },
+    "hosts": {
+      "host": {
+        "aaaaaaaa-0000-4000-8000-000000000001": {
+          "domain": "home.example",
+          "enabled": "1",
+          "hostname": "nas",
+          "rr": {"A": {"selected": 1, "value": "A (IPv4 address)"}, "AAAA": {"selected": 0, "value": "AAAA (IPv6 address)"}},
+          "server": "192.168.1.20"
+        }
+      }
+    }
+  }
+}

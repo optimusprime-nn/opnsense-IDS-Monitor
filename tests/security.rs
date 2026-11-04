@@ -254,7 +254,7 @@ fn http_urls_are_refused_unless_allowed() {
     cfg.opnsense.allow_http = true;
     assert!(cfg.validate().is_ok());
 
-    let srv = DnsServerCfg { name: "ns1".into(), url: "http://192.0.2.53:5380".into(), token: "t".into() };
+    let srv = DnsServerCfg { name: "ns1".into(), url: "http://192.0.2.53:5380".into(), token: "t".into(), ..Default::default() };
     cfg.dns.servers.push(srv.clone());
     assert!(cfg.validate().is_err());
     assert!(ipswatch::dns::Technitium::new(&srv, 5, false).is_err());

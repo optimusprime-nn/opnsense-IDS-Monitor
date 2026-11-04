@@ -1,4 +1,4 @@
-//! DNS page: Technitium servers - up/down, traffic, blocking, clients, zones, exposure.
+//! DNS page: Technitium / Unbound servers - up/down, traffic, blocking, clients, zones, exposure.
 
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
@@ -81,12 +81,15 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
                 let ms = srv.lookups.iter().filter(|l| l.ok).map(|l| l.ms).max();
                 tile(ui, RichText::new(txt).color(col), &format!("{} · {}{}", srv.name, srv.host, ms.map(|m| format!(" · {m} ms")).unwrap_or_default()));
                 if let Some(st) = &srv.stats {
-                    tile(ui, RichText::new(st.total.to_string()), "queries, last hour");
+                    let window = if srv.stats_window.is_empty() { "last hour" } else { srv.stats_window.as_str() };
+                    tile(ui, RichText::new(st.total.to_string()), &format!("queries, {window}"));
                     tile(ui, RichText::new(format!("{:.1}%", st.pct(st.blocked))), "blocked");
                     let sf = st.pct(st.servfail);
                     tile(ui, RichText::new(format!("{sf:.1}%")).color(if sf >= 5.0 { sev_color(Severity::Medium, dark) } else { ui.visuals().text_color() }), "upstream failures");
                     tile(ui, RichText::new(format!("{:.1}%", st.pct(st.nxdomain))), "NXDOMAIN");
-                    tile(ui, RichText::new(st.clients.to_string()), "clients");
+                    if st.clients > 0 || srv.backend != "unbound" {
+                        tile(ui, RichText::new(st.clients.to_string()), "clients");
+                    }
                 }
                 if let Some(age) = srv.blocklist_age_hours {
                     tile(ui, RichText::new(format!("{age:.0} h")), "blocklists updated");
@@ -95,6 +98,8 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
             let mut info = vec![];
             if !srv.version.is_empty() {
                 info.push(format!("Technitium {}", srv.version));
+            } else if srv.backend == "unbound" {
+                info.push("OPNsense Unbound".into());
             }
             if !srv.update.is_empty() {
                 info.push(format!("update {} available", srv.update));
@@ -116,6 +121,9 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
             ui.weak(info.join(" · "));
             if !srv.api_error.is_empty() {
                 ui.label(RichText::new(format!("API: {}", srv.api_error)).color(ui.visuals().warn_fg_color));
+            }
+            for n in &srv.notes {
+                ui.label(RichText::new(n).color(ui.visuals().warn_fg_color));
             }
             for e in &srv.errors {
                 ui.label(RichText::new(format!("Check failed - {e}")).color(ui.visuals().warn_fg_color));
@@ -161,7 +169,7 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
             }
         });
 
-        if srv.api_ok {
+        if srv.api_ok && srv.backend != "unbound" {
             ui.horizontal_wrapped(|ui| {
                 ui.weak("Failed resolutions in the server log, last hour:");
                 ui.label(RichText::new(srv.upstream_failures.to_string()).strong());
@@ -187,7 +195,7 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
                         e.protocol.clone(),
                         e.interface.clone(),
                         if e.blocked { "forwarded, no pass rule".into() } else { "OPEN".into() },
-                        if e.purpose.is_empty() { "(not a Technitium port)".into() } else { e.purpose.clone() },
+                        if e.purpose.is_empty() { format!("(not a {} port)", srv.product()) } else { e.purpose.clone() },
                         match e.listening {
                             Some(true) => "yes".into(),
                             Some(false) => "no".into(),
@@ -208,7 +216,7 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
                 .map(|c| vec![c.ip.clone(), c.name.clone(), c.hits.to_string(), c.usual.map(|u| format!("{u:.0}")).unwrap_or_else(|| "learning".into())])
                 .collect();
             table(&mut cols[0], &id("cl"), &["Client", "Name", "Queries", "Usual/h"], &[120.0, 170.0, 70.0], rows);
-            cols[1].strong("Top blocked domains (last hour)");
+            cols[1].strong(format!("Top blocked domains ({})", if srv.top_window.is_empty() { "last hour" } else { &srv.top_window }));
             let rows = srv.top_blocked.iter().map(|(d, n)| vec![d.clone(), n.to_string()]).collect();
             table(&mut cols[1], &id("bl"), &["Domain", "Hits"], &[300.0], rows);
         });
@@ -218,27 +226,31 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
             ui.strong(format!("NXDOMAIN by client since the last check (from {})", srv.query_logger));
             let rows = srv.nx_clients.iter().map(|c| vec![c.ip.clone(), c.count.to_string(), c.unique.to_string(), c.sample.join(", ")]).collect();
             table(ui, &id("nx"), &["Client", "Failed", "Distinct", "Examples"], &[120.0, 70.0, 70.0], rows);
+        } else if srv.api_ok && srv.backend == "unbound" {
+            ui.weak("NXDOMAIN bursts per client need Unbound statistics (Reporting > Unbound DNS).");
         } else if srv.api_ok {
             ui.weak("NXDOMAIN bursts per client need a query-log app (e.g. \"Query Logs (Sqlite)\" from Technitium's App Store).");
         }
 
-        egui::CollapsingHeader::new(format!("Zones ({})", srv.zones.len())).id_salt(id("z")).default_open(false).show(ui, |ui| {
-            let rows = srv
-                .zones
-                .iter()
-                .map(|z| {
-                    vec![
-                        if z.name.is_empty() { "(root)".into() } else { z.name.clone() },
-                        z.kind.clone(),
-                        z.serial.clone(),
-                        ipswatch::local_time(&z.modified),
-                        if z.disabled { "disabled".into() } else if z.problem.is_empty() { "ok".into() } else { z.problem.clone() },
-                    ]
-                })
-                .collect();
-            table(ui, &id("zt"), &["Zone", "Type", "Serial", "Last modified", "Status"], &[220.0, 90.0, 110.0, 150.0], rows);
-        });
-        egui::CollapsingHeader::new("Top domains (last hour)").id_salt(id("td")).default_open(false).show(ui, |ui| {
+        if srv.backend != "unbound" {
+            egui::CollapsingHeader::new(format!("Zones ({})", srv.zones.len())).id_salt(id("z")).default_open(false).show(ui, |ui| {
+                let rows = srv
+                    .zones
+                    .iter()
+                    .map(|z| {
+                        vec![
+                            if z.name.is_empty() { "(root)".into() } else { z.name.clone() },
+                            z.kind.clone(),
+                            z.serial.clone(),
+                            ipswatch::local_time(&z.modified),
+                            if z.disabled { "disabled".into() } else if z.problem.is_empty() { "ok".into() } else { z.problem.clone() },
+                        ]
+                    })
+                    .collect();
+                table(ui, &id("zt"), &["Zone", "Type", "Serial", "Last modified", "Status"], &[220.0, 90.0, 110.0, 150.0], rows);
+            });
+        }
+        egui::CollapsingHeader::new(format!("Top domains ({})", if srv.top_window.is_empty() { "last hour" } else { &srv.top_window })).id_salt(id("td")).default_open(false).show(ui, |ui| {
             let rows = srv.top_domains.iter().map(|(d, n)| vec![d.clone(), n.to_string()]).collect();
             table(ui, &id("tdt"), &["Domain", "Hits"], &[320.0], rows);
         });

@@ -1,0 +1,27 @@
+{
+  "unbound": {
+    "acls": {
+      "acl": [],
+      "default_action": {
+        "allow": {"selected": 0, "value": "Allow"},
+        "deny": {"selected": 0, "value": "Deny"},
+        "refuse": {"selected": 1, "value": "Refuse"}
+      }
+    },
+    "dnsbl": {
+      "address": "",
+      "enabled": "1",
+      "lists": "https://lists.example.net/a.txt,https://lists.example.net/b.txt",
+      "nxdomain": "0",
+      "safesearch": "0",
+      "type": {
+        "atf": {"selected": 1, "value": "Abuse.ch - ThreatFox IOC database"},
+        "aa": {"selected": 0, "value": "AdAway List"}
+      },
+      "whitelists": ""
+    },
+    "dots": {"dot": []},
+    "forwarding": {"enabled": "1"},
+    "general": {"enabled": "1", "port": "5353", "stats": "0"}
+  }
+}

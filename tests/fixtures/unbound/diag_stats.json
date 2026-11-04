@@ -1,0 +1,31 @@
+{
+  "status": "ok",
+  "data": {
+    "thread0": {"num": {"queries": "51000", "cachehits": "40000"}},
+    "total": {
+      "num": {
+        "queries": "52000",
+        "queries_ip_ratelimited": "0",
+        "cachehits": "41000",
+        "cachemiss": "11000",
+        "prefetch": "900",
+        "expired": "0",
+        "recursivereplies": "11000"
+      },
+      "requestlist": {"avg": "0.5", "max": "12"},
+      "recursion": {"time": {"avg": "0.081", "median": "0.04"}}
+    },
+    "time": {"now": "1793664000.123", "up": "86400.5", "elapsed": "300.1"},
+    "num": {
+      "answer": {
+        "rcode": {"NOERROR": "48000", "FORMERR": "0", "SERVFAIL": "700", "NXDOMAIN": "3300", "NOTIMPL": "0", "REFUSED": "0", "nodata": "1200"},
+        "secure": "1000",
+        "bogus": "0"
+      },
+      "query": {"type": {"A": "30000", "AAAA": "20000"}}
+    },
+    "histogram": [
+      {"from": [0, 0], "to": [0, 1], "value": "100"}
+    ]
+  }
+}
