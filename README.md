@@ -12,7 +12,8 @@ alerts from OPNsense, stores them in SQLite, correlates them with the firewall l
 - **Alerts**: Windows toast notifications, and optionally Slack/Discord/webhook, ntfy and email.
 - **Response**: acknowledge / false positive, block or unblock an IP through a firewall alias, and optional auto-block.
 - **Dark mode**: dark by default, with Light and Follow Windows options (View → Theme, the Settings menu, or Settings → Application). The title bar changes too, and exported HTML reports follow the viewer's dark/light preference.
-- **Secrets**: the API key, API secret and SMTP password are encrypted with Windows DPAPI.
+- **Secrets**: the API key and secret, SMTP password, DNS tokens and webhook/ntfy URLs are encrypted with Windows DPAPI.
+  Firewall and DNS connections must use HTTPS unless you explicitly allow plain HTTP in Settings.
 
 ![Findings](docs/findings.png)
 
@@ -141,7 +142,10 @@ plus the severity/repeat/scan points. These usually matter most: something is al
 2. Download rule sets (e.g. ET open / abuse.ch). Under *Policy*, set the categories you want blocked to **Drop**.
    In IPS mode only *drop* rules block traffic; IPS Watch treats any alert that wasn't dropped as "reached the host".
 3. Optional realtime feed: enable **eve syslog output** (advanced mode), then *System → Settings → Logging → Remote*
-   with application `suricata` → this PC, port 5514. Allow that port in Windows Firewall.
+   with application `suricata` → this PC, port 5514. Allow that port in Windows Firewall, only from the firewall.
+   Only the firewall's own addresses (or the *Allowed senders* you list) are accepted. Syslog can't prove who sent
+   a message, so alerts seen only via syslog are shown and alerted on but never trigger auto-block on their own.
+   Intake is bounded (line length, connections, queued events); anything dropped is logged.
 
 **API user** (*System → Access → Users*): create a dedicated user and give it only the Intrusion Detection
 and firewall-log privileges, plus *Firewall: Alias* if you'll block IPs. Then create an API key for it.
@@ -173,7 +177,12 @@ nothing changes until you confirm. Use **Set up Drop policy...** (on the banner,
 
 **Blocking**: create a *Host(s)* alias `ipswatch_block` and a WAN **Block** rule at the top with that alias
 as the source. Leave auto-block in dry run until you trust the findings. Internal, private and reserved
-addresses, and anything on the never-block list, are never blocked.
+addresses (including multicast, CGNAT and IPv6 link-local), and anything on the never-block list, are never
+blocked. Auto-block only acts on sources the firewall API itself reported, and a block counts only once the
+firewall confirms it and the address shows up in the alias.
+
+If more alerts arrive than one poll can download (*page size × max pages*), IPS Watch catches up over the
+following polls instead of skipping the rest, and shows "Alert history is behind" until it has.
 
 ## Command line
 
@@ -190,7 +199,8 @@ ipswatch-cli report report.html
 ipswatch-cli -c path\to\config.toml ...     # use another settings file
 ```
 
-`deploy/ipswatch.service` runs the CLI as a Linux service.
+`deploy/ipswatch.service` runs the CLI as a Linux service. Outside Windows there is no DPAPI, so secrets
+are stored as written: the config is created with mode 0600 in a 0700 folder and the service sets `UMask=0077`.
 
 ## Development
 

@@ -158,11 +158,7 @@ pub fn blockable(cfg: &Config, ip: &str) -> Result<(), String> {
     if nets.is_internal(ip) {
         return Err(format!("{ip} is inside your internal networks"));
     }
-    let private = match addr {
-        IpAddr::V4(a) => a.is_private() || a.is_loopback() || a.is_link_local() || a.is_unspecified() || a.is_broadcast(),
-        IpAddr::V6(a) => a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00,
-    };
-    if private {
+    if is_reserved(addr) {
         return Err(format!("{ip} is a private/reserved address"));
     }
     let never = parse_nets(&cfg.block.never_block).map_err(|e| e.to_string())?;
@@ -172,9 +168,55 @@ pub fn blockable(cfg: &Config, ip: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Addresses that are never a real outside attacker: private, loopback, link-local, multicast,
+/// shared/CGNAT, "this network", benchmarking and future-use ranges, IPv6 unique-local,
+/// link-local and multicast, and IPv4-mapped IPv6 forms of any of those.
+pub fn is_reserved(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(a) => {
+            let [o1, o2, ..] = a.octets();
+            a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.is_broadcast()
+                || a.is_multicast()
+                || o1 == 0 // "this network"
+                || (o1 == 100 && (64..128).contains(&o2)) // shared address space (CGNAT)
+                || (o1 == 192 && o2 == 0 && a.octets()[2] == 0) // IETF protocol assignments
+                || (o1 == 198 && (o2 == 18 || o2 == 19)) // benchmarking
+                || o1 >= 240 // reserved for future use
+        }
+        IpAddr::V6(a) => {
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return is_reserved(IpAddr::V4(v4));
+            }
+            let s0 = a.segments()[0];
+            a.is_loopback()
+                || a.is_unspecified()
+                || a.is_multicast()
+                || (s0 & 0xfe00) == 0xfc00 // unique local
+                || (s0 & 0xffc0) == 0xfe80 // link local
+        }
+    }
+}
+
 fn maybe_block(cfg: &Config, store: &Store, api: &OPNsense, f: &mut Finding) {
     if f.kind != "inbound" || f.severity < cfg.block.min_severity || blockable(cfg, &f.subject_ip).is_err() {
         return;
+    }
+    // Syslog is unauthenticated and can be forged: only block when the firewall's own API
+    // reported this source too.
+    match store.has_api_event_from(&f.subject_ip, &f.first_seen) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("not auto-blocking {}: only seen via syslog/import, not confirmed by the firewall API", f.subject_ip);
+            return;
+        }
+        Err(e) => {
+            error!("not auto-blocking {}: {e:#}", f.subject_ip);
+            return;
+        }
     }
     if cfg.block.dry_run {
         warn!("[dry-run] would add {} to alias {}", f.subject_ip, cfg.block.alias);
@@ -239,5 +281,5 @@ pub fn rescore(cfg: &Config, store: &Store) -> Result<RescoreResult> {
 /// Delete events older than the retention period.
 pub fn prune(cfg: &Config, store: &Store) -> Result<usize> {
     let cutoff = crate::iso(Utc::now() - Duration::days(cfg.retention_days.max(1) as i64));
-    store.prune_events(&cutoff)
+    Ok(store.prune_events(&cutoff)? + store.cap_events(cfg.max_events)?)
 }

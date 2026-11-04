@@ -23,10 +23,28 @@ fn quote(s: &str) -> String {
         .collect()
 }
 
+/// alias_util add/delete answer {"status": "done"}; anything else (e.g. "failed") is an error.
+fn alias_write_ok(v: &Value) -> Result<()> {
+    match v.get("status").and_then(Value::as_str) {
+        Some("done") => Ok(()),
+        Some(other) => bail!("the firewall answered '{other}'{}", v.get("message").and_then(Value::as_str).map(|m| format!(": {m}")).unwrap_or_default()),
+        None => bail!("unexpected answer from the firewall: {v}"),
+    }
+}
+
+/// Alias entries may be listed as "1.2.3.4" or "1.2.3.4/32".
+fn same_address(entry: &str, address: &str) -> bool {
+    let e = entry.trim();
+    e == address || e.strip_suffix("/32").or_else(|| e.strip_suffix("/128")) == Some(address)
+}
+
 impl OPNsense {
     pub fn new(cfg: &OpnsenseCfg) -> Result<Self> {
         if cfg.url.trim().is_empty() {
             bail!("The firewall URL is not configured");
+        }
+        if !cfg.url.trim().starts_with("https://") && !cfg.allow_http {
+            bail!("The firewall URL must use https:// (http:// would send the API key and secret unencrypted)");
         }
         let mut tls = native_tls::TlsConnector::builder();
         if !cfg.verify_tls {
@@ -148,13 +166,24 @@ impl OPNsense {
     }
 
     // ---- Alias management (blocking) ------------------------------------
+    /// Add an address to an alias. Succeeds only when the firewall reports success AND the
+    /// address is then actually listed in the alias.
     pub fn alias_add(&self, alias: &str, address: &str) -> Result<()> {
-        self.req("POST", &format!("firewall/alias_util/add/{}", quote(alias)), Some(json!({"address": address})), &[])?;
+        let v = self.req("POST", &format!("firewall/alias_util/add/{}", quote(alias)), Some(json!({"address": address})), &[])?;
+        alias_write_ok(&v).with_context(|| format!("adding {address} to alias {alias}"))?;
+        if !self.alias_list(alias)?.iter().any(|a| same_address(a, address)) {
+            bail!("adding {address} to alias {alias}: the firewall accepted it, but the address is not in the alias");
+        }
         Ok(())
     }
 
+    /// Remove an address from an alias, verified the same way.
     pub fn alias_delete(&self, alias: &str, address: &str) -> Result<()> {
-        self.req("POST", &format!("firewall/alias_util/delete/{}", quote(alias)), Some(json!({"address": address})), &[])?;
+        let v = self.req("POST", &format!("firewall/alias_util/delete/{}", quote(alias)), Some(json!({"address": address})), &[])?;
+        alias_write_ok(&v).with_context(|| format!("removing {address} from alias {alias}"))?;
+        if self.alias_list(alias)?.iter().any(|a| same_address(a, address)) {
+            bail!("removing {address} from alias {alias}: the firewall accepted it, but the address is still in the alias");
+        }
         Ok(())
     }
 

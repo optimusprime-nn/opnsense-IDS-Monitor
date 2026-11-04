@@ -79,6 +79,7 @@ struct Lists {
     dns_domains: String,
     smtp_to: String,
     never_block: String,
+    syslog_senders: String,
 }
 
 pub struct SettingsForm {
@@ -129,6 +130,7 @@ impl SettingsForm {
             ignore_sources: join(&d.ignore_sources),
             smtp_to: join(&cfg.notify.smtp_to),
             never_block: join(&cfg.block.never_block),
+            syslog_senders: join(&cfg.syslog.allowed_senders),
             informational: join(&d.informational_prefixes),
             fw_ignore_ports: join(&cfg.firewall.correlate_ignore_ports),
             policy_rulesets: join(&cfg.ips_policy.rulesets),
@@ -201,6 +203,7 @@ impl SettingsForm {
         c.detect.ignore_sources = split(&l.ignore_sources, true);
         c.notify.smtp_to = split(&l.smtp_to, true);
         c.block.never_block = split(&l.never_block, true);
+        c.syslog.allowed_senders = split(&l.syslog_senders, true);
         c.detect.sensitive_ports = nums(&l.sensitive_ports, "").unwrap_or(c.detect.sensitive_ports);
         c.detect.ignore_sids = nums(&l.ignore_sids, "").unwrap_or(c.detect.ignore_sids);
         c.detect.informational_prefixes = split(&l.informational, false);
@@ -302,6 +305,9 @@ impl SettingsForm {
             row(ui, "Verify TLS certificate", "Turn off only for a self-signed cert you can't add a CA for", |ui| {
                 ui.checkbox(&mut d.opnsense.verify_tls, "");
             });
+            row(ui, "Allow unencrypted HTTP", "Not recommended: an http:// URL sends the API key and secret in the clear", |ui| {
+                ui.checkbox(&mut d.opnsense.allow_http, "");
+            });
             row(ui, "CA certificate file", "Leave empty for Let's Encrypt. Not sure? Click Check certificate (help below)", |ui| {
                 text(ui, &mut d.opnsense.ca_file, 260.0);
                 if ui.button("Browse...").clicked() {
@@ -359,11 +365,12 @@ impl SettingsForm {
             ui.weak(format!("Firewall's own addresses (auto-detected hourly, treated as internal): {}", self.own_ips));
             ui.add_space(4.0);
         }
-        ui.weak("The API key, API secret and SMTP password are encrypted with Windows DPAPI when saved, so only your Windows account can read them.");
+        ui.weak("The API key, API secret, SMTP password, DNS tokens and webhook/ntfy URLs are encrypted with Windows DPAPI when saved, so only your Windows account can read them.");
     }
 
     fn collection(&mut self, ui: &mut Ui) {
         let s = &mut self.draft.syslog;
+        let senders = &mut self.lists.syslog_senders;
         ui.label("Optional realtime feed: OPNsense System > Settings > Logging > Remote, application \"suricata\". \
                   Requires \"Enable eve syslog output\" in Intrusion Detection. The API poller still runs and fills gaps.");
         ui.add_space(8.0);
@@ -372,6 +379,12 @@ impl SettingsForm {
                 ui.checkbox(&mut s.enabled, "");
             });
             row(ui, "Listen address", "0.0.0.0 = all interfaces", |ui| text(ui, &mut s.bind, 160.0));
+            row(
+                ui,
+                "Allowed senders",
+                "One IP/CIDR per line. Empty = the firewall only (its URL and interface addresses).                  Syslog can't prove who sent it, so alerts seen only via syslog never trigger auto-block",
+                |ui| multi(ui, senders, 3),
+            );
             row(ui, "Port", "Allow it in Windows Firewall", |ui| num(ui, &mut s.port, 1..=65535));
             row(ui, "Protocol", "", |ui| {
                 ComboBox::from_id_salt("proto").selected_text(s.protocol.to_uppercase()).show_ui(ui, |ui| {
@@ -528,6 +541,12 @@ impl SettingsForm {
         ui.add_space(8.0);
         let show = self.show_secrets;
         let d = &mut self.draft.dns;
+        grid(ui, "dns_http", |ui| {
+            row(ui, "Allow unencrypted HTTP", "Not recommended: http:// consoles send the API token in the clear. Enable HTTPS in Technitium (Settings > Web Service)", |ui| {
+                ui.checkbox(&mut d.allow_http, "");
+            });
+        });
+        ui.add_space(6.0);
         let mut remove = None;
         for (i, srv) in d.servers.iter_mut().enumerate() {
             egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
@@ -538,7 +557,7 @@ impl SettingsForm {
                             remove = Some(i);
                         }
                     });
-                    row(ui, "Web console URL", "e.g. http://192.168.1.53:5380 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
+                    row(ui, "Web console URL", "e.g. https://192.168.1.53:53443 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
                     row(ui, "API token", "Technitium: Administration > Sessions > Create Token (a read-only user is enough)", |ui| {
                         ui.add(TextEdit::singleline(&mut srv.token).password(!show).desired_width(360.0));
                     });

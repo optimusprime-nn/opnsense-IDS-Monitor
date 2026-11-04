@@ -172,7 +172,7 @@ fn verify_blocklists(cfg: &config::Config, servers: &[&config::DnsServerCfg]) ->
     let mut samples: HashMap<String, Result<(usize, Vec<String>), String>> = HashMap::new();
     let mut failures = 0;
     for srv in servers {
-        let t = Technitium::new(srv, cfg.dns.timeout_seconds)?;
+        let t = Technitium::new(srv, cfg.dns.timeout_seconds, cfg.dns.allow_http)?;
         let set = t.get("settings/get", &[])?;
         let stats = t.get("dashboard/stats/get", &[("type", "LastHour")])?;
         let urls: Vec<String> = set.get("blockListUrls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -456,7 +456,7 @@ fn run() -> Result<()> {
                 return verify_blocklists(&cfg, &servers);
             }
             for srv in servers {
-                let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?;
+                let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds, cfg.dns.allow_http)?;
                 let set = t.get("settings/get", &[])?;
                 let mut urls: Vec<String> = set.get("blockListUrls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
                 let old = urls.clone();
@@ -489,7 +489,7 @@ fn run() -> Result<()> {
         Cmd::DumpDns { server, path, params } => {
             let srv = cfg.dns.servers.iter().find(|s| s.label() == server || s.host() == server).context("no such DNS server in the config")?;
             let q: Vec<(&str, &str)> = params.iter().filter_map(|p| p.split_once('=')).collect();
-            let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds)?;
+            let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds, cfg.dns.allow_http)?;
             if path.starts_with("logs/download") {
                 print!("{}", t.get_text(&path, &q)?);
                 return Ok(());

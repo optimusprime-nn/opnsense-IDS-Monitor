@@ -52,14 +52,20 @@ Filename: "{app}\IPSWatch.exe"; Description: "Start IPS Watch"; Flags: nowait po
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
 
-{ Stop only IPS Watch copies running from this install folder. }
+function SetEnvironmentVariable(lpName, lpValue: String): BOOL;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+{ Stop only IPS Watch copies running from this install folder. The folder reaches PowerShell in
+  an environment variable, never pasted into the command, so no folder name can change it. }
 procedure StopInstalledCopy();
 var
   Code: Integer;
 begin
+  SetEnvironmentVariable('IPSWATCH_APP_DIR', ExpandConstant('{app}'));
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -NonInteractive -Command "Get-Process IPSWatch,ipswatch-cli -ErrorAction SilentlyContinue | ' +
-    'Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"',
+    '-NoProfile -NonInteractive -Command "$d = $env:IPSWATCH_APP_DIR.TrimEnd(''\'') + ''\''; ' +
+    'Get-Process IPSWatch,ipswatch-cli -ErrorAction SilentlyContinue | ' +
+    'Where-Object { $_.Path -and $_.Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 

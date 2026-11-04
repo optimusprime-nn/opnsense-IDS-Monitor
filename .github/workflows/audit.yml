@@ -1,0 +1,35 @@
+name: Dependency audit
+
+# Checks Cargo.lock against the RustSec advisory database. Fails on known vulnerabilities;
+# "unmaintained" and "unsound" notices are reported as warnings. Runs on changes to the
+# dependencies and weekly, because new advisories appear without any change here.
+#
+# Runs on push to any branch rather than on pull_request: the org runner group only admits
+# workflows listed by branch ref, and pull_request runs present refs/pull/N/merge, which
+# can't be listed. Push checks still show on a PR, because they attach to the head commit.
+
+on:
+  push:
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/audit.yml]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: [self-hosted, linux, big]
+    container:
+      image: rust:1-bookworm
+      volumes:
+        - /srv/ci-cache/cargo/registry:/usr/local/cargo/registry
+        - /srv/ci-cache/cargo/git:/usr/local/cargo/git
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Cargo.lock
+        run: cargo audit
