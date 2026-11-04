@@ -5,11 +5,14 @@ name: CI
 #   It runs on windows-latest until the self-hosted Windows runner is online;
 #   then switch runs-on to [self-hosted, windows, msvc].
 # fmt and clippy are advisory for now: they report, but don't fail the build.
+#
+# Runs on push to any branch rather than on pull_request: the org runner group only admits
+# workflows listed by branch ref, and pull_request runs present refs/pull/N/merge, which
+# can't be listed. Push checks still show on a PR, because they attach to the head commit.
+# A new branch needs its own entry in the runner group's allowed workflows.
 
 on:
   push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
