@@ -1,0 +1,27 @@
+title: IPS Watch
+description: Windows tray app and CLI that watches OPNsense Suricata alerts, firewall health and DNS, and flags real unwanted access.
+remote_theme: just-the-docs/just-the-docs@v0.10.0
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+back_to_top: true
+back_to_top_text: "Back to top"
+
+aux_links:
+  "IPS Watch on GitHub":
+    - "https://github.com/optimusprime-nn/opnsense-IDS-Monitor"
+aux_links_new_tab: true
+
+footer_content: "IPS Watch documentation. Screenshots use made-up demo data."
+
+callouts:
+  note:
+    title: Note
+    color: blue
+  warning:
+    title: Warning
+    color: yellow
