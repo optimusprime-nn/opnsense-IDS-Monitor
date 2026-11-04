@@ -15,7 +15,9 @@ alerts from OPNsense, stores them in SQLite, correlates them with the firewall l
 - **Secrets**: the API key and secret, SMTP password, DNS tokens and webhook/ntfy URLs are encrypted with Windows DPAPI.
   Firewall and DNS connections must use HTTPS unless you explicitly allow plain HTTP in Settings.
 
-![Findings](docs/findings.png)
+**Documentation:** https://optimusprime-nn.github.io/opnsense-IDS-Monitor/
+
+![Findings](docs/assets/img/findings.png)
 
 ```
  OPNsense ──(REST API poll: ids/service/query_alerts, firewall log)──┐
@@ -64,7 +66,7 @@ copy takes it over the first time it runs.
 | Application | Theme (dark / light / follow Windows), start with Windows, start minimized, close to tray, auto-start monitoring, desktop alerts and their minimum severity |
 | Data & storage | Database file, event retention, delete old events, delete all data, open data folder |
 
-![Settings](docs/settings.png)
+![Settings](docs/assets/img/settings-application.png)
 
 ## Firewall health, exposure, devices and config changes
 
