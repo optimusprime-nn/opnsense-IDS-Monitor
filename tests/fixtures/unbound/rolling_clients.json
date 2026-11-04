@@ -1,0 +1,11 @@
+{
+  "1793660400": {
+    "192.168.1.20": {"count": 40, "hostname": "nas.home.example"},
+    "192.168.1.31": {"count": 12, "hostname": ""}
+  },
+  "1793660460": {
+    "192.168.1.20": {"count": 35, "hostname": "nas.home.example"},
+    "192.168.1.44": {"count": 50, "hostname": "laptop.home.example"}
+  },
+  "1793660520": {}
+}

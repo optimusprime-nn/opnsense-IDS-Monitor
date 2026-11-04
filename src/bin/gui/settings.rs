@@ -1,7 +1,7 @@
 //! Settings editor: every config option, grouped into sections, edited as a draft.
 
 use eframe::egui::{self, ComboBox, DragValue, RichText, TextEdit, Ui};
-use ipswatch::config::{Config, Severity, Theme};
+use ipswatch::config::{Config, DnsKind, Severity, Theme};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -224,7 +224,7 @@ impl SettingsForm {
         c.opnsense.url = c.opnsense.url.trim().to_string();
         for d in &mut c.dns.servers {
             d.url = d.url.trim().trim_end_matches('/').to_string();
-            d.token = d.token.trim().to_string();
+            d.token = if d.kind == DnsKind::Unbound { String::new() } else { d.token.trim().to_string() };
         }
         c.validate().map_err(|e| format!("{e:#}"))?;
         Ok(c)
@@ -537,7 +537,7 @@ impl SettingsForm {
     }
 
     fn dns(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        ui.label("Watches your Technitium DNS servers: each one answering, upstream failures, blocklists, unusual clients,                   zone and settings changes, and WAN port forwards to them. Results are on the DNS page.");
+        ui.label("Watches your DNS servers - Technitium, or OPNsense's built-in Unbound: each one answering, upstream failures, blocklists, unusual clients, settings changes, and WAN port forwards to them. Results are on the DNS page.");
         ui.add_space(8.0);
         let show = self.show_secrets;
         let d = &mut self.draft.dns;
@@ -557,10 +557,26 @@ impl SettingsForm {
                             remove = Some(i);
                         }
                     });
-                    row(ui, "Web console URL", "e.g. https://192.168.1.53:53443 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
-                    row(ui, "API token", "Technitium: Administration > Sessions > Create Token (a read-only user is enough)", |ui| {
-                        ui.add(TextEdit::singleline(&mut srv.token).password(!show).desired_width(360.0));
+                    row(ui, "Server type", "Technitium is read through its own API with a token; Unbound through the firewall API (Firewall section)", |ui| {
+                        ComboBox::from_id_salt(format!("dns_kind{i}")).selected_text(srv.kind.product()).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut srv.kind, DnsKind::Technitium, "Technitium");
+                            ui.selectable_value(&mut srv.kind, DnsKind::Unbound, "Unbound (OPNsense)");
+                        });
                     });
+                    match srv.kind {
+                        DnsKind::Technitium => {
+                            row(ui, "Web console URL", "e.g. https://192.168.1.53:53443 - test queries go to this host on port 53", |ui| text(ui, &mut srv.url, 300.0));
+                            row(ui, "API token", "Technitium: Administration > Sessions > Create Token (a read-only user is enough)", |ui| {
+                                ui.add(TextEdit::singleline(&mut srv.token).password(!show).desired_width(360.0));
+                            });
+                        }
+                        DnsKind::Unbound => {
+                            row(ui, "DNS address (optional)", "Where test queries go on port 53, e.g. 192.168.1.1. Empty: the firewall's address", |ui| text(ui, &mut srv.url, 300.0));
+                            row(ui, "", "", |ui| {
+                                ui.weak("Uses the firewall API key. For traffic, top clients and NXDOMAIN bursts, turn on statistics under Reporting > Unbound DNS.");
+                            });
+                        }
+                    }
                 });
             });
             ui.add_space(4.0);
@@ -585,12 +601,12 @@ impl SettingsForm {
             row(ui, "Upstream failure alert (%)", "SERVFAIL share of the last hour's queries", |ui| {
                 ui.add(DragValue::new(&mut d.servfail_pct).range(0.5..=100.0).speed(0.5));
             });
-            row(ui, "Blocklist age alert (hours)", "", |ui| num(ui, &mut d.blocklist_max_age_hours, 1..=2160));
+            row(ui, "Blocklist age alert (hours)", "Technitium only (OPNsense doesn't report when Unbound's lists were downloaded)", |ui| num(ui, &mut d.blocklist_max_age_hours, 1..=2160));
             row(ui, "Busy client threshold (queries/hour)", "Below this a client is never unusual", |ui| num(ui, &mut d.client_queries_per_hour, 100..=1_000_000));
             row(ui, "Busy client factor", "... and it must be this many times its usual hourly rate", |ui| {
                 ui.add(DragValue::new(&mut d.client_spike_factor).range(1.5..=100.0).speed(0.5));
             });
-            row(ui, "NXDOMAIN burst (per client per check)", "Many lookups of names that don't exist = possible malware (DGA). Needs a query-log app in Technitium", |ui| {
+            row(ui, "NXDOMAIN burst (per client per check)", "Many lookups of names that don't exist = possible malware (DGA). Needs a query-log app in Technitium, or statistics on for Unbound", |ui| {
                 num(ui, &mut d.nxdomain_burst, 10..=100_000)
             });
             row(ui, "Zone / settings change alerts", "", |ui| {
@@ -602,7 +618,7 @@ impl SettingsForm {
             actions.push(Action::TestDns);
         }
         ui.add_space(6.0);
-        ui.weak("Tokens are encrypted with Windows DPAPI when saved, like the firewall API key. IPS Watch only reads from the DNS servers.");
+        ui.weak("Tokens are encrypted with Windows DPAPI when saved, like the firewall API key. IPS Watch only reads from the DNS servers and the firewall.");
     }
 
     fn application(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {

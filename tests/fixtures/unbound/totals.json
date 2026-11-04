@@ -1,0 +1,18 @@
+{
+  "total": 48210,
+  "blocklist_size": 152344,
+  "passed": 45102,
+  "resolved": {"total": 9120, "pcnt": "18.92"},
+  "blocked": {"total": 3108, "pcnt": "6.45"},
+  "local": {"total": 812, "pcnt": "1.68"},
+  "start_time": 1793600000,
+  "top": {
+    "connectivity-check.example.com": {"total": 2210, "pcnt": "4.90"},
+    "time.example.org": {"total": 9001, "pcnt": "19.96"},
+    "cdn.example.net": {"total": 2210, "pcnt": "4.90"}
+  },
+  "top_blocked": {
+    "ads.example.com": {"total": 1201, "pcnt": "38.64", "blocklist": "AdGuard List", "latest_policy_uuid": "4eaac1bd-d2cd-4c74-995f-3f9cd6b01fd2", "category": "General Blocklists"},
+    "telemetry.example.com": {"total": 640, "pcnt": "20.59", "blocklist": "Threat Intelligence Feeds", "latest_policy_uuid": "4eaac1bd-d2cd-4c74-995f-3f9cd6b01fd2", "category": "Hagezi Targeted Lists"}
+  }
+}

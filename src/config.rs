@@ -422,14 +422,44 @@ impl Default for IpsPolicyCfg {
     }
 }
 
-/// One Technitium DNS server.
+/// Which DNS server software a configured server runs.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DnsKind {
+    /// Technitium DNS Server, read through its own HTTP API with a token.
+    #[default]
+    Technitium,
+    /// OPNsense's built-in Unbound resolver, read through the firewall API (OPNsense settings above).
+    Unbound,
+}
+
+impl DnsKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DnsKind::Technitium => "technitium",
+            DnsKind::Unbound => "unbound",
+        }
+    }
+    pub fn product(self) -> &'static str {
+        match self {
+            DnsKind::Technitium => "Technitium",
+            DnsKind::Unbound => "Unbound",
+        }
+    }
+}
+
+/// One monitored DNS server.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
 pub struct DnsServerCfg {
     pub name: String,
-    /// Web console, e.g. http://192.168.1.53:5380
+    /// "technitium" (default) or "unbound".
+    pub kind: DnsKind,
+    /// Technitium: web console, e.g. https://192.168.1.53:53443.
+    /// Unbound: optional address test queries go to (default: the firewall's address).
     pub url: String,
-    /// API token (Administration > Sessions > Create Token); DPAPI-encrypted on disk.
+    /// Technitium API token (Administration > Sessions > Create Token); DPAPI-encrypted on disk.
+    /// Not used for Unbound, which reads through the firewall's API key.
     pub token: String,
 }
 
@@ -445,11 +475,24 @@ impl DnsServerCfg {
         hostport.rsplit_once(':').map(|x| x.0).unwrap_or(hostport).to_string()
     }
     pub fn label(&self) -> String {
-        if self.name.trim().is_empty() { self.host() } else { self.name.trim().to_string() }
+        match (self.name.trim(), self.host()) {
+            ("", h) if h.is_empty() && self.kind == DnsKind::Unbound => "Unbound (firewall)".into(),
+            ("", h) => h,
+            (n, _) => n.to_string(),
+        }
+    }
+    /// Address test queries go to. Unbound without an address of its own runs on the firewall.
+    pub fn query_host(&self, firewall_url: &str) -> String {
+        let h = self.host();
+        if h.is_empty() && self.kind == DnsKind::Unbound {
+            DnsServerCfg { url: firewall_url.to_string(), ..Default::default() }.host()
+        } else {
+            h
+        }
     }
 }
 
-/// Technitium DNS server monitoring.
+/// DNS server monitoring (Technitium or OPNsense Unbound).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct DnsCfg {
@@ -563,6 +606,15 @@ impl Config {
             bail!("Page size and max pages must be at least 1");
         }
         for d in &self.dns.servers {
+            if d.kind == DnsKind::Unbound {
+                if self.opnsense.url.trim().is_empty() {
+                    bail!("DNS server '{}': Unbound is read through the firewall API - set the firewall URL first", d.label());
+                }
+                if !d.url.trim().is_empty() && d.host().is_empty() {
+                    bail!("DNS server '{}': the address must be an IP address or host name, e.g. 192.168.1.1", d.label());
+                }
+                continue;
+            }
             if !(d.url.starts_with("http://") || d.url.starts_with("https://")) || d.host().is_empty() {
                 bail!("DNS server '{}': console URL must look like https://192.168.1.53:53443", d.label());
             }
@@ -689,7 +741,7 @@ mod tests {
         let mut c = Config::default();
         c.opnsense.api_secret = "s3cr\"et".into();
         c.detect.ignore_sids = vec![1, 2];
-        c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.53:5380".into(), token: "t0kenvalue".into() });
+        c.dns.servers.push(DnsServerCfg { name: "ns1".into(), url: "http://192.168.1.53:5380".into(), token: "t0kenvalue".into(), ..Default::default() });
         save(&c, &p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         // Secrets are DPAPI-encrypted on Windows; other platforms store them as written.

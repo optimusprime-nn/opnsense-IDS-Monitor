@@ -1,0 +1,5 @@
+{
+  "1793660400": {"total": 120, "passed": 110, "blocked": 8, "dropped": 2, "resolved": 30, "local": 5, "cached": 75},
+  "1793660460": {"total": 80, "passed": 78, "blocked": 2, "dropped": 0, "resolved": 20, "local": 0, "cached": 58},
+  "1793660520": {"total": 0, "passed": 0, "blocked": 0, "dropped": 0, "resolved": 0, "local": 0, "cached": 0}
+}

@@ -181,6 +181,36 @@ finding_scenarios = [
 bouncer_stale_minutes = 10
 boost_ips = true
 
+[dns]
+enabled = true
+interval_minutes = 5
+timeout_seconds = 10
+test_domains = [
+    "cloudflare.com",
+    "opnsense.org",
+]
+servfail_pct = 10.0
+blocklist_max_age_hours = 48
+client_queries_per_hour = 3000
+client_spike_factor = 5.0
+nxdomain_burst = 200
+change_alerts = true
+allow_http = false
+
+# Technitium: its own API with a token (encrypted with DPAPI when saved).
+# [[dns.servers]]
+# name = "ns1"
+# kind = "technitium"
+# url = "https://192.168.1.53:53443"
+# token = ""
+
+# OPNsense Unbound: read through the [opnsense] API key above. url is optional:
+# the address test queries go to (default: the firewall's address).
+# [[dns.servers]]
+# name = "firewall"
+# kind = "unbound"
+# url = ""
+
 [gui]
 theme = "dark"
 autostart_monitor = true

@@ -74,7 +74,7 @@ enum Cmd {
     },
     /// Run the firewall health, exposure, device and config checks once and print the result
     Health,
-    /// Check the Technitium DNS servers once and print the result
+    /// Check the DNS servers (Technitium / Unbound) once and print the result
     Dns {
         /// Skip the firewall exposure audit (port forwards to the DNS servers)
         #[arg(long)]
@@ -407,30 +407,43 @@ fn run() -> Result<()> {
                 println!("{r}");
             }
             for s in &snap.servers {
-                println!("{} ({}) - DNS {} - API {}", s.name, s.host, if s.dns_ok { "UP" } else { "DOWN" }, if s.api_ok { format!("OK, Technitium {}", s.version) } else { s.api_error.clone() });
+                println!("{} ({}) - DNS {} - API {}", s.name, s.host, if s.dns_ok { "UP" } else { "DOWN" }, if s.api_ok { format!("OK, {} {}", s.product(), s.version) } else { s.api_error.clone() });
+                for n in &s.notes {
+                    println!("  note: {n}");
+                }
                 for l in &s.lookups {
                     println!("  lookup {:<20} {:<9} {} answers {:>4} ms", l.domain, l.result, l.answers, l.ms);
                 }
                 if let Some(st) = &s.stats {
-                    println!("  last hour: {} queries, {:.1}% blocked, {:.1}% SERVFAIL, {:.1}% NXDOMAIN, {} clients, {} blocklist domains",
-                        st.total, st.pct(st.blocked), st.pct(st.servfail), st.pct(st.nxdomain), st.clients, st.block_list_zones);
+                    println!("  {}: {} queries, {:.1}% blocked, {:.1}% SERVFAIL, {:.1}% NXDOMAIN, {} clients, {} blocklist domains",
+                        if s.stats_window.is_empty() { "last hour" } else { &s.stats_window }, st.total, st.pct(st.blocked), st.pct(st.servfail), st.pct(st.nxdomain), st.clients, st.block_list_zones);
                 }
-                println!("  recursion {} · forwarders {} · blocking {} ({} lists, refreshed {} h ago, next {})",
-                    s.recursion, if s.forwarders.is_empty() { "none".into() } else { s.forwarders.join(", ") }, s.blocking, s.blocklist_urls,
-                    s.blocklist_age_hours.map(|a| format!("{a:.1}")).unwrap_or("?".into()), ipswatch::local_time(&s.blocklist_next_update));
-                println!("  server log, last hour: {} failed resolutions; failing most: {}; name servers timing out: {}",
-                    s.upstream_failures, ipswatch::dns::pairs_text(&s.failing_names, 6), ipswatch::dns::pairs_text(&s.silent_nameservers, 5));
+                let unbound = s.backend == "unbound";
+                let forwarders = if s.forwarders.is_empty() { "none".into() } else { s.forwarders.join(", ") };
+                if unbound {
+                    println!("  {} · forwarders {forwarders} · blocking {} ({} lists)", s.recursion, s.blocking, s.blocklist_urls);
+                } else {
+                    println!("  recursion {} · forwarders {forwarders} · blocking {} ({} lists, refreshed {} h ago, next {})",
+                        s.recursion, s.blocking, s.blocklist_urls,
+                        s.blocklist_age_hours.map(|a| format!("{a:.1}")).unwrap_or("?".into()), ipswatch::local_time(&s.blocklist_next_update));
+                    println!("  server log, last hour: {} failed resolutions; failing most: {}; name servers timing out: {}",
+                        s.upstream_failures, ipswatch::dns::pairs_text(&s.failing_names, 6), ipswatch::dns::pairs_text(&s.silent_nameservers, 5));
+                }
                 for c in s.top_clients.iter().take(5) {
                     println!("  client {:<16} {:<30} {:>6} queries (usual {})", c.ip, c.name, c.hits, c.usual.map(|u| format!("{u:.0}")).unwrap_or("learning".into()));
                 }
                 for (d, n) in s.top_blocked.iter().take(5) {
                     println!("  blocked {d} x{n}");
                 }
-                println!("  query log app: {}", if s.query_logger.is_empty() { "none" } else { &s.query_logger });
+                if !unbound {
+                    println!("  query log app: {}", if s.query_logger.is_empty() { "none" } else { &s.query_logger });
+                }
                 for c in &s.nx_clients {
                     println!("  nxdomain {:<16} {:>5} ({} distinct) e.g. {}", c.ip, c.count, c.unique, c.sample.join(", "));
                 }
-                println!("  zones: {}", s.zones.iter().map(|z| format!("{} [{}{}]", z.name, z.kind, if z.problem.is_empty() { String::new() } else { format!(", {}", z.problem) })).collect::<Vec<_>>().join(", "));
+                if !unbound {
+                    println!("  zones: {}", s.zones.iter().map(|z| format!("{} [{}{}]", z.name, z.kind, if z.problem.is_empty() { String::new() } else { format!(", {}", z.problem) })).collect::<Vec<_>>().join(", "));
+                }
                 for e in &s.exposure {
                     println!("  WAN {} {}/{} {} - used for: {} - listening: {:?} - {}", e.interface, e.port, e.protocol, if e.blocked { "blocked" } else { "OPEN" }, if e.purpose.is_empty() { "-" } else { &e.purpose }, e.listening, e.note);
                 }
@@ -450,8 +463,13 @@ fn run() -> Result<()> {
             }
         }
         Cmd::DnsBlocklists { server, add, remove, verify, yes } => {
-            let servers: Vec<_> = cfg.dns.servers.iter().filter(|s| server.as_ref().is_none_or(|n| s.label() == *n || s.host() == *n)).collect();
-            anyhow::ensure!(!servers.is_empty(), "no matching DNS server in the config");
+            let servers: Vec<_> = cfg
+                .dns
+                .servers
+                .iter()
+                .filter(|s| s.kind == config::DnsKind::Technitium && server.as_ref().is_none_or(|n| s.label() == *n || s.host() == *n))
+                .collect();
+            anyhow::ensure!(!servers.is_empty(), "no matching Technitium DNS server in the config (Unbound blocklists are managed in OPNsense)");
             if verify {
                 return verify_blocklists(&cfg, &servers);
             }
@@ -487,7 +505,12 @@ fn run() -> Result<()> {
             }
         }
         Cmd::DumpDns { server, path, params } => {
-            let srv = cfg.dns.servers.iter().find(|s| s.label() == server || s.host() == server).context("no such DNS server in the config")?;
+            let srv = cfg
+                .dns
+                .servers
+                .iter()
+                .find(|s| s.kind == config::DnsKind::Technitium && (s.label() == server || s.host() == server))
+                .context("no such Technitium DNS server in the config (for Unbound use dump-api unbound/...)")?;
             let q: Vec<(&str, &str)> = params.iter().filter_map(|p| p.split_once('=')).collect();
             let t = ipswatch::dns::Technitium::new(srv, cfg.dns.timeout_seconds, cfg.dns.allow_http)?;
             if path.starts_with("logs/download") {

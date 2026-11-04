@@ -56,6 +56,7 @@ copy takes it over the first time it runs.
 |---|---|
 | Firewall connection | URL, API key/secret, TLS verify / CA file, timeout, poll interval, paging, firewall-log correlation |
 | Collection | Realtime syslog receiver: on/off, address, port, UDP/TCP |
+| DNS servers | Technitium or OPNsense Unbound servers to watch, test lookups, alert thresholds |
 | Detection | Internal networks, window, score threshold, brute-force/sweep/port-scan thresholds, sensitive ports, ignored SIDs, trusted sources, re-notify interval |
 | Signature rules | Compromise categories and signature keywords |
 | Notifications | Webhook (Slack/Discord/generic), ntfy, SMTP; minimum severity; test button |
@@ -92,6 +93,51 @@ Findings can be filtered by kind (IPS / Health / Exposure / New devices / Config
 
 The API user needs read access to these pages: Gateways, Services, Diagnostics (system, ARP, firewall log),
 Firewall rules / NAT, DHCP leases and Configuration history.
+
+## DNS servers
+
+The **DNS** page watches the resolvers your network uses (*Settings → DNS servers*, checked every 5 minutes).
+Each server is one of two types:
+
+- **Technitium** - read through its own HTTP API with a token (*Administration → Sessions → Create Token*).
+- **Unbound (OPNsense)** - the firewall's built-in resolver, read through the firewall API with the same
+  key and secret as everything else. No token. Test queries go to the firewall's address unless you enter
+  another one (e.g. the LAN address Unbound listens on).
+
+| Check | Technitium | Unbound |
+|---|---|---|
+| Test lookups on port 53, server down / failover, all down | yes | yes |
+| SERVFAIL share (upstream failures) | last hour, from the dashboard | last hour, from the query log; without statistics, from `unbound-control` counters between checks (needs *Advanced → Extended statistics*) |
+| Traffic, blocked share, top domains / blocked domains | last hour | last hour (top domains: since statistics started) |
+| Unusual clients (query spikes against a learned baseline) | yes | yes (top 10 clients per minute, so counts are lower bounds) |
+| NXDOMAIN bursts per client (possible malware / DGA) | needs a query-log app | from the query log (the newest 1000 queries) |
+| Blocklists empty | yes | yes (domains loaded by Unbound's blocklist module) |
+| Blocklist age, update available, zones, upstream-failure log | yes | not available in OPNsense, skipped |
+| Settings changes | yes | yes, including overrides, forwarders, access lists and blocklist policies |
+| WAN port forwards to the server, open resolver | yes | yes |
+
+For Unbound, most checks need **local statistics**: in OPNsense open *Reporting → Unbound DNS* and enable
+them in its settings. While they're off the DNS page says so and a LOW finding ("Unbound statistics are off")
+stays open. The API user needs read access to the Unbound DNS pages (settings, reporting overview,
+diagnostics). IPS Watch only sends GET requests to them.
+
+In the settings file:
+
+```toml
+[[dns.servers]]
+name = "ns1"
+kind = "technitium"            # the default; existing configs keep working
+url = "https://192.168.1.53:53443"
+token = "..."                   # DPAPI-encrypted when saved
+
+[[dns.servers]]
+name = "firewall"
+kind = "unbound"
+url = ""                        # optional: address for test queries; empty = the firewall
+```
+
+CLI: `ipswatch-cli dns` runs the DNS checks once and prints a summary. `dump-dns` and `dns-blocklists`
+are Technitium-only; for Unbound use `dump-api unbound/overview/totals/10` and the like.
 
 ## What gets flagged
 

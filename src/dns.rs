@@ -1,5 +1,8 @@
-//! Technitium DNS servers: reachability, resolution, traffic, blocklists, unusual clients,
+//! DNS servers: reachability, resolution, traffic, blocklists, unusual clients,
 //! zone / settings changes and WAN exposure.
+//!
+//! Two backends: Technitium (its own HTTP API, everything below) and OPNsense's Unbound
+//! (through the firewall API, see [`unbound`]; checks Unbound has no equivalent for are skipped).
 //!
 //! * Health (`dns:health:*`, resolved automatically): API reachable, test lookups answered on
 //!   port 53 (with failover state when one server is down), SERVFAIL rate, blocklist age,
@@ -15,7 +18,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-use crate::config::{Config, DnsServerCfg, Severity};
+use crate::config::{Config, DnsKind, DnsServerCfg, Severity};
+
+pub mod unbound;
 use crate::health::{Exposed, Problem};
 use crate::store::{Finding, Store};
 
@@ -93,8 +98,11 @@ pub struct DnsExposure {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ServerStatus {
     pub name: String,
+    /// "technitium" or "unbound".
+    pub backend: String,
     pub url: String,
     pub host: String,
     pub server_domain: String,
@@ -124,7 +132,19 @@ pub struct ServerStatus {
     pub upstream_failures: u64,
     pub failing_names: Vec<(String, u64)>,
     pub silent_nameservers: Vec<(String, u64)>,
+    /// What `stats` covers when it isn't the last hour, e.g. "since the last check".
+    pub stats_window: String,
+    /// What the top domain lists cover when it isn't the last hour, e.g. "since 2026-11-01 10:00".
+    pub top_window: String,
+    /// Informational notes (not errors), e.g. a statistics feature that is turned off.
+    pub notes: Vec<String>,
     pub errors: Vec<String>,
+}
+
+impl ServerStatus {
+    pub fn product(&self) -> &'static str {
+        if self.backend == "unbound" { "Unbound" } else { "Technitium" }
+    }
 }
 
 /// "a (3), b (2)"
@@ -523,8 +543,16 @@ struct Baseline {
 
 const LEARN_SAMPLES: u32 = 12;
 
-#[allow(clippy::too_many_arguments)]
 fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exposed], st: &mut ServerStatus, out: &mut Vec<Problem>) {
+    check_lookups(cfg, srv, st, out);
+    match srv.kind {
+        DnsKind::Technitium => check_technitium(cfg, store, srv, exposure, st, out),
+        DnsKind::Unbound => unbound::check(cfg, store, exposure, st, out),
+    }
+}
+
+/// Test lookups on port 53: works against any DNS server, no API needed.
+fn check_lookups(cfg: &Config, srv: &DnsServerCfg, st: &mut ServerStatus, out: &mut Vec<Problem>) {
     let d = &cfg.dns;
     let label = srv.label();
     let host = st.host.clone();
@@ -546,7 +574,13 @@ fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exp
             targets: vec![host.clone()],
         });
     }
+}
 
+fn check_technitium(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exposed], st: &mut ServerStatus, out: &mut Vec<Problem>) {
+    let d = &cfg.dns;
+    let label = srv.label();
+    let host = st.host.clone();
+    let timeout = Duration::from_secs(d.timeout_seconds.clamp(2, 5));
     let api = match Technitium::new(srv, d.timeout_seconds, d.allow_http) {
         Ok(a) if !srv.token.trim().is_empty() => a,
         Ok(_) => {
@@ -617,26 +651,7 @@ fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exp
             let pairs = |k: &str| -> Vec<(String, u64)> { arr(&v, k).iter().map(|e| (s(e, "name"), u(e, "hits"))).take(10).collect() };
             st.top_domains = pairs("topDomains");
             st.top_blocked = pairs("topBlockedDomains");
-            if stats.total >= 100 && stats.pct(stats.servfail) >= d.servfail_pct {
-                out.push(Problem {
-                    key: format!("dns:health:{host}:servfail"),
-                    kind: "dns",
-                    severity: Severity::Medium,
-                    title: format!("DNS {label}: {:.1}% of queries failing upstream", stats.pct(stats.servfail)),
-                    reasons: [
-                        Some(format!("{} of {} queries in the last hour answered SERVFAIL (limit {}%)", stats.servfail, stats.total, d.servfail_pct)),
-                        Some(if st.forwarders.is_empty() { "recursive resolution (no forwarders)".into() } else { format!("forwarders: {}", st.forwarders.join(", ")) }),
-                        (st.upstream_failures > 0).then(|| format!("server log: {} failed resolutions in the last hour", st.upstream_failures)),
-                        (!st.failing_names.is_empty()).then(|| format!("failing most: {}", pairs_text(&st.failing_names, 6))),
-                        (!st.silent_nameservers.is_empty()).then(|| format!("name servers timing out: {}", pairs_text(&st.silent_nameservers, 5))),
-                        Some("timeouts to many unrelated name servers point at the internet link (WAN, firewall states); a few names failing over and over is usually those domains' own problem".into()),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-                    targets: vec![host.clone()],
-                });
-            }
+            servfail_problem(cfg, &stats, st, out);
             if st.blocking && st.blocklist_urls > 0 && stats.block_list_zones == 0 {
                 out.push(Problem {
                     key: format!("dns:health:{host}:blocklist"),
@@ -682,11 +697,38 @@ fn check_server(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &[Exp
         }
     }
 
-    check_exposure(&set, &host, &label, exposure, timeout, st, out);
+    let ctx = ExposureCtx { purposes: port_purposes(&set), open_resolver: recursion_open(&set), product: "Technitium" };
+    check_exposure(&ctx, &host, &label, exposure, timeout, st, out);
+}
+
+/// SERVFAIL share above the configured limit (needs at least 100 queries in the window).
+fn servfail_problem(cfg: &Config, stats: &Stats, st: &ServerStatus, out: &mut Vec<Problem>) {
+    let d = &cfg.dns;
+    if stats.total < 100 || stats.pct(stats.servfail) < d.servfail_pct {
+        return;
+    }
+    let window = if st.stats_window.is_empty() { "in the last hour" } else { st.stats_window.as_str() };
+    out.push(Problem {
+        key: format!("dns:health:{}:servfail", st.host),
+        kind: "dns",
+        severity: Severity::Medium,
+        title: format!("DNS {}: {:.1}% of queries failing upstream", st.name, stats.pct(stats.servfail)),
+        reasons: [
+            Some(format!("{} of {} queries {window} answered SERVFAIL (limit {}%)", stats.servfail, stats.total, d.servfail_pct)),
+            Some(if st.forwarders.is_empty() { "recursive resolution (no forwarders)".into() } else { format!("forwarders: {}", st.forwarders.join(", ")) }),
+            (st.upstream_failures > 0).then(|| format!("server log: {} failed resolutions in the last hour", st.upstream_failures)),
+            (!st.failing_names.is_empty()).then(|| format!("failing most: {}", pairs_text(&st.failing_names, 6))),
+            (!st.silent_nameservers.is_empty()).then(|| format!("name servers timing out: {}", pairs_text(&st.silent_nameservers, 5))),
+            Some("timeouts to many unrelated name servers point at the internet link (WAN, firewall states); a few names failing over and over is usually those domains' own problem".into()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        targets: vec![st.host.clone()],
+    });
 }
 
 fn check_clients(cfg: &Config, store: &Store, api: &Technitium, st: &mut ServerStatus, out: &mut Vec<Problem>) {
-    let d = &cfg.dns;
     let v = match api.get("dashboard/stats/getTop", &[("type", "LastHour"), ("statsType", "TopClients"), ("limit", "1000")]) {
         Ok(v) => v,
         Err(e) => {
@@ -694,12 +736,18 @@ fn check_clients(cfg: &Config, store: &Store, api: &Technitium, st: &mut ServerS
             return;
         }
     };
+    let rows = arr(&v, "topClients").iter().map(|c| (s(c, "name"), s(c, "domain"), u(c, "hits"))).collect();
+    score_clients(cfg, store, st, rows, "see the top domains for this client in Technitium", out);
+}
+
+/// Compare each client's queries in the last hour with its learned usual rate and report spikes.
+/// `rows` are (address, name, queries in the last hour).
+fn score_clients(cfg: &Config, store: &Store, st: &mut ServerStatus, rows: Vec<(String, String, u64)>, hint: &str, out: &mut Vec<Problem>) {
+    let d = &cfg.dns;
     let key = format!("dns_baseline:{}", st.host);
     let mut base: Baseline = store.get_kv(&key).ok().flatten().and_then(|x| serde_json::from_str(&x).ok()).unwrap_or_default();
     let mut clients = Vec::new();
-    for c in arr(&v, "topClients") {
-        let ip = s(&c, "name");
-        let hits = u(&c, "hits");
+    for (ip, name, hits) in rows {
         let entry = base.clients.get(&ip).copied();
         let usual = entry.filter(|e| e.1 >= LEARN_SAMPLES).map(|e| e.0);
         let busy = hits >= d.client_queries_per_hour
@@ -720,8 +768,8 @@ fn check_clients(cfg: &Config, store: &Store, api: &Technitium, st: &mut ServerS
                         Some(u) => format!("usually about {u:.0} per hour ({:.0}x normal)", hits as f64 / u.max(1.0)),
                         None => "new client, no usual rate yet".into(),
                     },
-                    format!("name: {}", if s(&c, "domain").is_empty() { "(no reverse name)".into() } else { s(&c, "domain") }),
-                    "could be malware, a misbehaving app or a DNS loop - see the top domains for this client in Technitium".into(),
+                    format!("name: {}", if name.is_empty() { "(no reverse name)" } else { &name }),
+                    format!("could be malware, a misbehaving app or a DNS loop - {hint}"),
                 ],
                 targets: vec![ip.clone()],
             });
@@ -730,7 +778,7 @@ fn check_clients(cfg: &Config, store: &Store, api: &Technitium, st: &mut ServerS
         let (avg, n) = entry.unwrap_or((hits as f64, 0));
         let sample = if busy { avg } else { hits as f64 };
         base.clients.insert(ip.clone(), (if n == 0 { sample } else { avg * 0.95 + sample * 0.05 }, n.saturating_add(1)));
-        clients.push(Client { ip, name: s(&c, "domain"), hits, usual });
+        clients.push(Client { ip, name, hits, usual });
     }
     clients.sort_by_key(|c| std::cmp::Reverse(c.hits));
     st.top_clients = clients.into_iter().take(15).collect();
@@ -758,7 +806,7 @@ fn check_nxdomain(cfg: &Config, store: &Store, api: &Technitium, st: &mut Server
         .filter(|t| now - *t < chrono::Duration::hours(2))
         .unwrap_or(now - chrono::Duration::minutes(cfg.dns.interval_minutes.max(1) as i64));
     let start = since.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    let mut per: BTreeMap<String, (u64, BTreeSet<String>)> = BTreeMap::new();
+    let mut per = NxCounts::new();
     for page in 1..=10 {
         let p = page.to_string();
         let v = match api.get(
@@ -783,6 +831,13 @@ fn check_nxdomain(cfg: &Config, store: &Store, api: &Technitium, st: &mut Server
         }
     }
     let _ = store.set_kv(&key, &crate::iso(now));
+    report_nx(cfg, st, per, since, out);
+}
+
+/// NXDOMAIN answers per client since `since`: (count, distinct names).
+pub type NxCounts = BTreeMap<String, (u64, BTreeSet<String>)>;
+
+fn report_nx(cfg: &Config, st: &mut ServerStatus, per: NxCounts, since: chrono::DateTime<chrono::Utc>, out: &mut Vec<Problem>) {
     let mut nx: Vec<NxClient> = per
         .into_iter()
         .map(|(ip, (count, names))| NxClient { ip, count, unique: names.len(), sample: names.into_iter().take(8).collect() })
@@ -808,10 +863,14 @@ fn check_nxdomain(cfg: &Config, store: &Store, api: &Technitium, st: &mut Server
 }
 
 fn check_changes(cfg: &Config, store: &Store, api: &Technitium, set: &Value, st: &mut ServerStatus, out: &mut Vec<Problem>) {
+    settings_change(cfg, store, st, sanitize(set), out);
+    zone_changes(cfg, store, api, st, out);
+}
+
+/// Compare sanitized settings with the stored copy and report what changed.
+fn settings_change(cfg: &Config, store: &Store, st: &ServerStatus, now_set: Value, out: &mut Vec<Problem>) {
     let host = st.host.clone();
     let label = st.name.clone();
-    // Settings.
-    let now_set = sanitize(set);
     let key = format!("dns_settings:{host}");
     if let Some(old) = store.get_kv(&key).ok().flatten().and_then(|x| serde_json::from_str::<Value>(&x).ok()) {
         let diff = settings_diff(&old, &now_set);
@@ -828,8 +887,11 @@ fn check_changes(cfg: &Config, store: &Store, api: &Technitium, set: &Value, st:
         }
     }
     let _ = store.set_kv(&key, &now_set.to_string());
+}
 
-    // Zones.
+fn zone_changes(cfg: &Config, store: &Store, api: &Technitium, st: &mut ServerStatus, out: &mut Vec<Problem>) {
+    let host = st.host.clone();
+    let label = st.name.clone();
     let v = match api.get("zones/list", &[]) {
         Ok(v) => v,
         Err(e) => {
@@ -907,9 +969,15 @@ fn check_changes(cfg: &Config, store: &Store, api: &Technitium, set: &Value, st:
     st.zones = zones;
 }
 
-fn check_exposure(set: &Value, host: &str, label: &str, exposure: &[Exposed], timeout: Duration, st: &mut ServerStatus, out: &mut Vec<Problem>) {
-    let purposes = port_purposes(set);
-    let open_resolver = recursion_open(set);
+/// What the server uses its ports for and whether it answers recursive queries from anyone.
+struct ExposureCtx {
+    purposes: BTreeMap<u16, Purpose>,
+    open_resolver: bool,
+    product: &'static str,
+}
+
+fn check_exposure(ctx: &ExposureCtx, host: &str, label: &str, exposure: &[Exposed], timeout: Duration, st: &mut ServerStatus, out: &mut Vec<Problem>) {
+    let (purposes, open_resolver, product) = (&ctx.purposes, ctx.open_resolver, ctx.product);
     for e in exposure.iter().filter(|e| e.target == host && e.source == "port forward") {
         let port = first_port(&e.port);
         let pp = port.and_then(|p| purposes.get(&p).cloned()).unwrap_or_default();
@@ -935,13 +1003,13 @@ fn check_exposure(set: &Value, host: &str, label: &str, exposure: &[Exposed], ti
                     kind: "dns",
                     severity: Severity::Critical,
                     title: format!("DNS {label}: web console is open to the internet"),
-                    reasons: vec![format!("{} forwards port {} to the Technitium {purpose}", e.interface, e.port), "anyone can try to log in as admin - remove the port forward".into()],
+                    reasons: vec![format!("{} forwards port {} to the {product} {purpose}", e.interface, e.port), "anyone can try to log in as admin - remove the port forward".into()],
                     targets: target,
                 });
             }
         } else if purpose.is_empty() {
             x.note = match listening {
-                Some(true) => "something listens here, but Technitium isn't configured for this port".into(),
+                Some(true) => format!("something listens here, but {product} isn't configured for this port"),
                 Some(false) => "nothing listens on this port - the forward does nothing".into(),
                 None => "not tested".into(),
             };
@@ -954,7 +1022,7 @@ fn check_exposure(set: &Value, host: &str, label: &str, exposure: &[Exposed], ti
                         title: format!("DNS {label}: unknown service on port {} is open to the internet", e.port),
                         reasons: vec![
                             format!("{} forwards {} {} to {host}, and the server accepts connections there", e.interface, e.protocol, e.port),
-                            "Technitium's settings don't use this port - check what it is, or whether 5380 / 53 was meant".into(),
+                            format!("{product}'s settings don't use this port - check what it is, or whether the console / 53 was meant"),
                         ],
                         targets: target,
                     }),
@@ -979,7 +1047,7 @@ fn check_exposure(set: &Value, host: &str, label: &str, exposure: &[Exposed], ti
                     title: format!("DNS {label} is an open resolver on the internet ({purpose})"),
                     reasons: vec![
                         format!("{} forwards {} {} to {host} and recursion is allowed for everyone", e.interface, e.protocol, e.port),
-                        "it can be abused for DNS amplification attacks - set Recursion to private networks only, or remove the forward".into(),
+                        "it can be abused for DNS amplification attacks - allow recursion for private networks only, or remove the forward".into(),
                     ],
                     targets: target,
                 });
@@ -1002,11 +1070,24 @@ pub fn test(cfg: &Config) -> (String, bool) {
     let mut err = false;
     let mut out = Vec::new();
     for srv in &cfg.dns.servers {
-        let mut lines = vec![format!("{} ({})", srv.label(), srv.url)];
+        let host = srv.query_host(&cfg.opnsense.url);
+        let shown = if srv.kind == DnsKind::Unbound { host.as_str() } else { srv.url.as_str() };
+        let mut lines = vec![format!("{} ({}, {shown})", srv.label(), srv.kind.product())];
         for dom in cfg.dns.test_domains.iter().filter(|x| !x.trim().is_empty()) {
-            let l = query(&srv.host(), dom.trim(), timeout);
+            let l = query(&host, dom.trim(), timeout);
             err |= !l.ok;
             lines.push(format!("  lookup {}: {} ({} answers, {} ms)", l.domain, l.result, l.answers, l.ms));
+        }
+        if srv.kind == DnsKind::Unbound {
+            match unbound::test(cfg) {
+                Ok(t) => lines.push(format!("  API: OK - {t}")),
+                Err(e) => {
+                    err = true;
+                    lines.push(format!("  API: FAILED - {e:#}"));
+                }
+            }
+            out.push(lines.join("\n"));
+            continue;
         }
         let api = if srv.token.trim().is_empty() {
             Err(anyhow!("no API token entered"))
@@ -1055,13 +1136,19 @@ pub fn ids_restarts(api: &crate::opnsense::OPNsense, hours: i64) -> Result<Vec<S
 pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed], ids_restarts: &[String]) -> Result<(Snapshot, Vec<Finding>)> {
     let mut snap = Snapshot { at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(), servers: vec![], ids_restarts: ids_restarts.to_vec() };
     let mut problems = Vec::new();
-    let servers: Vec<&DnsServerCfg> = cfg.dns.servers.iter().filter(|s| !s.url.trim().is_empty()).collect();
+    let servers: Vec<&DnsServerCfg> = cfg.dns.servers.iter().filter(|s| s.kind == DnsKind::Unbound || !s.url.trim().is_empty()).collect();
     std::thread::scope(|sc| {
         let handles: Vec<_> = servers
             .iter()
             .map(|srv| {
                 sc.spawn(move || {
-                    let mut st = ServerStatus { name: srv.label(), url: srv.url.clone(), host: srv.host(), ..Default::default() };
+                    let mut st = ServerStatus {
+                        name: srv.label(),
+                        backend: srv.kind.as_str().into(),
+                        url: srv.url.clone(),
+                        host: srv.query_host(&cfg.opnsense.url),
+                        ..Default::default()
+                    };
                     let mut out = Vec::new();
                     check_server(cfg, store, srv, exposure, &mut st, &mut out);
                     for e in &st.errors {
@@ -1095,7 +1182,13 @@ pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed], ids_restarts: &[St
             reasons: vec![
                 why,
                 format!("clients fail over to {} - lookups are slower and there is no redundancy", up.iter().map(|u| u.name.as_str()).collect::<Vec<_>>().join(", ")),
-                if s.api_ok { "the web console still answers, so the DNS service itself is stuck".into() } else { format!("web console: {}", if s.api_error.is_empty() { "unreachable" } else { &s.api_error }) },
+                if s.notes.iter().any(|n| n == unbound::TURNED_OFF) {
+                    unbound::TURNED_OFF.into()
+                } else if s.api_ok {
+                    "the API still answers, so the DNS service itself is stuck".into()
+                } else {
+                    format!("API: {}", if s.api_error.is_empty() { "unreachable" } else { &s.api_error })
+                },
             ],
             targets: vec![s.host.clone()],
         });
@@ -1106,7 +1199,13 @@ pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed], ids_restarts: &[St
             kind: "dns",
             severity: Severity::Critical,
             title: "No DNS server is answering - name resolution is down on the LAN".into(),
-            reasons: down.iter().map(|s| format!("{} ({}): {}", s.name, s.host, s.lookups.first().map(|l| l.result.as_str()).unwrap_or("?"))).collect(),
+            reasons: down
+                .iter()
+                .map(|s| {
+                    let off = if s.notes.iter().any(|n| n == unbound::TURNED_OFF) { format!(" - {}", unbound::TURNED_OFF) } else { String::new() };
+                    format!("{} ({}): {}{off}", s.name, s.host, s.lookups.first().map(|l| l.result.as_str()).unwrap_or("?"))
+                })
+                .collect(),
             targets: down.iter().map(|s| s.host.clone()).collect(),
         });
     }
