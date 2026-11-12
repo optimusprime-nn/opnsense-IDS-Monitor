@@ -175,6 +175,49 @@ pub struct App {
     dns_busy: bool,
 }
 
+/// A finding as plain text, for the clipboard.
+fn finding_text(f: &Finding) -> String {
+    let mut t = format!("[{}] {}
+score {} · {} events · {}
+first {}
+last {}
+",
+        f.severity.as_str().to_uppercase(), f.title, f.score, f.event_count, f.status_label(),
+        ipswatch::local_time(&f.first_seen), ipswatch::local_time(&f.last_seen));
+    if !f.subject_ip.is_empty() {
+        t += &format!("IP: {}
+", f.subject_ip);
+    }
+    if let Some(b) = &f.blocked_at {
+        t += &format!("blocked {}
+", ipswatch::local_time(b));
+    }
+    t += "
+Why it was flagged:
+";
+    for r in &f.reasons {
+        t += &format!("  - {r}
+");
+    }
+    if !f.targets.is_empty() {
+        t += &format!("
+Targets: {}
+", f.targets.join(", "));
+    }
+    if !f.signatures.is_empty() {
+        t += "
+Signatures:
+";
+        for s in &f.signatures {
+            t += &format!("  {s}
+");
+        }
+    }
+    t + &format!("
+key: {}
+", f.key)
+}
+
 fn theme_pref(t: Theme) -> egui::ThemePreference {
     match t {
         Theme::System => egui::ThemePreference::System,
@@ -1049,6 +1092,16 @@ impl App {
                     if r.clicked() {
                         clicked = Some(f.key.clone());
                     }
+                    r.context_menu(|ui| {
+                        if ui.button("Copy details").clicked() {
+                            ui.ctx().copy_text(finding_text(f));
+                            ui.close_menu();
+                        }
+                        if !f.subject_ip.is_empty() && ui.button("Copy IP").clicked() {
+                            ui.ctx().copy_text(f.subject_ip.clone());
+                            ui.close_menu();
+                        }
+                    });
                     if r.double_clicked() {
                         double = Some(f.subject_ip.clone());
                     }
@@ -1104,6 +1157,9 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
+                if ui.button("Copy details").on_hover_text("Copy everything shown below as text").clicked() {
+                    ui.ctx().copy_text(finding_text(&f));
+                }
                 if ui.button("Copy IP").clicked() {
                     ui.ctx().copy_text(f.subject_ip.clone());
                 }
@@ -1257,6 +1313,23 @@ impl App {
                                 ignore = Some((sid, e.signature.clone()));
                                 ui.close_menu();
                             }
+                        }
+                        if ui.button("Copy row").clicked() {
+                            ui.ctx().copy_text(format!(
+                                "{}  {} {}:{} -> {}:{} {}  {}  [{}] {}  ({})",
+                                ipswatch::local_time(&e.ts),
+                                e.action,
+                                e.src_ip,
+                                e.src_port.map(|p| p.to_string()).unwrap_or_default(),
+                                e.dest_ip,
+                                e.dest_port.map(|p| p.to_string()).unwrap_or_default(),
+                                e.proto,
+                                e.iface,
+                                e.sid.map(|p| p.to_string()).unwrap_or_default(),
+                                e.signature,
+                                e.category
+                            ));
+                            ui.close_menu();
                         }
                         if ui.button("Copy source IP").clicked() {
                             ui.ctx().copy_text(e.src_ip.clone());
@@ -1513,6 +1586,11 @@ impl eframe::App for App {
                         }
                         if ui.button("  OK  ").clicked() {
                             close = true;
+                        }
+                        if ui.button("Copy").clicked() {
+                            ui.ctx().copy_text(format!("{title}
+
+{text}"));
                         }
                     });
                 });
