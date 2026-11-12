@@ -1,7 +1,7 @@
 ---
 title: IPS events and log
 parent: Desktop app (GUI)
-nav_order: 4
+nav_order: 5
 ---
 
 # IPS events and the activity log

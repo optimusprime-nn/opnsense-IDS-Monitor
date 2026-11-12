@@ -1,7 +1,7 @@
 ---
 title: Settings
 parent: Desktop app (GUI)
-nav_order: 5
+nav_order: 6
 ---
 
 # Settings (desktop app)

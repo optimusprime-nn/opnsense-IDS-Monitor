@@ -181,6 +181,16 @@ kind = "unbound"
 url = ""
 ```
 
+## [troubleshoot]
+
+Used by the [Troubleshoot](../gui/troubleshoot.html) page and `ipswatch-cli troubleshoot`.
+
+| Key | Default | GUI | Description |
+|---|---|---|---|
+| `sites` | `["claude.ai", "api.anthropic.com", "cloudflare.com", "google.com"]` | Troubleshoot → Sites to test | Checked from this PC (DNS, connect, HTTPS) on every run |
+| `log_rows` | `3000` | | Firewall log rows read to find blocked traffic |
+| `clock_tolerance_seconds` | `120` | | Clock difference between the firewall and this PC that counts as wrong |
+
 ## [gui]
 
 Used by the desktop app only.

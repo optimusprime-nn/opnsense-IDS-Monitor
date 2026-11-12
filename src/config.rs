@@ -492,6 +492,28 @@ impl DnsServerCfg {
     }
 }
 
+/// The Troubleshoot page: sites that must work, and how much of the firewall log to read.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct TroubleshootCfg {
+    /// Sites checked from this PC (DNS, connect, HTTPS) on every troubleshoot run.
+    pub sites: Vec<String>,
+    /// Firewall log rows read to find blocked traffic.
+    pub log_rows: u32,
+    /// Clock difference (seconds) between the firewall and this PC that counts as wrong.
+    pub clock_tolerance_seconds: i64,
+}
+
+impl Default for TroubleshootCfg {
+    fn default() -> Self {
+        Self {
+            sites: ["claude.ai", "api.anthropic.com", "cloudflare.com", "google.com"].map(String::from).to_vec(),
+            log_rows: 3000,
+            clock_tolerance_seconds: 120,
+        }
+    }
+}
+
 /// DNS server monitoring (Technitium or OPNsense Unbound).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -553,6 +575,7 @@ pub struct Config {
     pub health: HealthCfg,
     pub crowdsec: CrowdsecCfg,
     pub dns: DnsCfg,
+    pub troubleshoot: TroubleshootCfg,
     pub gui: GuiCfg,
 }
 
@@ -573,6 +596,7 @@ impl Default for Config {
             health: Default::default(),
             crowdsec: Default::default(),
             dns: Default::default(),
+            troubleshoot: Default::default(),
             gui: Default::default(),
         }
     }
