@@ -175,6 +175,19 @@ pub struct App {
     dns_busy: bool,
 }
 
+/// Remember when the Drop policy was applied (or forget it when removed), so the
+/// "not dropping" warning starts counting again from now.
+fn record_policy_change(store: &ipswatch::store::Store, applied: bool) {
+    let r = if applied {
+        store.set_kv(ipswatch::ipspolicy::APPLIED_KV, &ipswatch::iso(chrono::Utc::now()))
+    } else {
+        store.delete_kv(ipswatch::ipspolicy::APPLIED_KV)
+    };
+    if let Err(e) = r {
+        log::warn!("Could not record the Drop policy change: {e:#}");
+    }
+}
+
 fn theme_pref(t: Theme) -> egui::ThemePreference {
     match t {
         Theme::System => egui::ThemePreference::System,
@@ -297,11 +310,7 @@ impl App {
         let since = ipswatch::iso(chrono::Utc::now() - chrono::Duration::hours(24));
         self.events_24h = store.event_count_since(&since).unwrap_or(0);
         self.events = store.recent_events(2000, &self.e_search).unwrap_or_default();
-        let week = ipswatch::iso(chrono::Utc::now() - chrono::Duration::days(7));
-        self.not_dropping = match store.action_counts_since(&week) {
-            Ok((total, 0)) if total >= 20 => Some(total),
-            _ => None,
-        };
+        self.not_dropping = store.undropped_alerts(chrono::Utc::now()).ok().flatten();
         self.settings.own_ips = engine::own_addresses(store).iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
         self.loaded_version = self.ctl.shared.data_version.load(Ordering::Relaxed);
         self.last_reload = Instant::now();
@@ -677,6 +686,7 @@ impl App {
         }
         self.policy_busy = true;
         let cfg = self.ctl.cfg();
+        let shared = self.ctl.shared.clone();
         self.spawn(move || {
             let r = OPNsense::new(&cfg.opnsense).and_then(|api| {
                 if act == "apply" {
@@ -685,6 +695,10 @@ impl App {
                     ipswatch::ipspolicy::remove(&api)
                 }
             });
+            if r.is_ok() {
+                record_policy_change(&shared.store, act == "apply");
+                shared.data_version.fetch_add(1, Ordering::Relaxed);
+            }
             match r {
                 Ok(msg) => Bg::Message { title: "Firewall IPS policy".into(), text: msg, error: false },
                 Err(e) => Bg::Message { title: "Firewall IPS policy".into(), text: format!("{e:#}"), error: true },

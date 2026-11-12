@@ -505,6 +505,23 @@ impl Store {
         )?)
     }
 
+    /// Alert count for the "your IPS isn't dropping anything" warning: `Some(total)` when at least
+    /// 20 alerts in the last 7 days were all let through. Alerts from before the IPS Watch Drop
+    /// policy was last applied (kv `ips_policy_applied_at`) don't count, since they say nothing
+    /// about the new policy.
+    pub fn undropped_alerts(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Option<i64>> {
+        let mut since = crate::iso(now - chrono::Duration::days(7));
+        if let Some(applied) = self.get_kv(crate::ipspolicy::APPLIED_KV)? {
+            if applied > since {
+                since = applied;
+            }
+        }
+        Ok(match self.action_counts_since(&since)? {
+            (total, 0) if total >= 20 => Some(total),
+            _ => None,
+        })
+    }
+
     pub fn delete_all(&self) -> Result<()> {
         self.conn().execute_batch("DELETE FROM events; DELETE FROM findings; DELETE FROM kv;")?;
         Ok(())

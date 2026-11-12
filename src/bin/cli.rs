@@ -337,12 +337,14 @@ fn run() -> Result<()> {
             if remove {
                 anyhow::ensure!(yes, "Removing changes the firewall: add --yes to confirm.");
                 println!("{}", ipswatch::ipspolicy::remove(&a)?);
+                store.delete_kv(ipswatch::ipspolicy::APPLIED_KV)?;
             } else {
                 let plan = ipswatch::ipspolicy::plan(&a, &cfg.ips_policy.rulesets)?;
                 println!("{}", plan.render());
                 if apply {
                     anyhow::ensure!(yes, "\nThis was a dry run. Add --yes to apply it.");
                     println!("\n{}", ipswatch::ipspolicy::apply(&a, &plan)?);
+                    store.set_kv(ipswatch::ipspolicy::APPLIED_KV, &ipswatch::iso(chrono::Utc::now()))?;
                 } else {
                     println!("\nDRY RUN - nothing was changed. Apply with: ipswatch-cli ips-policy --apply --yes");
                 }

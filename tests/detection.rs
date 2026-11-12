@@ -393,3 +393,25 @@ fn damaged_database_is_rebuilt_from_backup_and_salvage() {
     assert!(store.get_finding("exposure:192.168.1.60:443").unwrap().is_some());
     assert!(store.get_kv("api_cursor").unwrap().is_none());
 }
+
+#[test]
+fn not_dropping_warning_ignores_alerts_before_the_drop_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("np.db")).unwrap();
+    // 25 alerts let through, all at 2026-10-19 12:00 + i seconds.
+    let evs: Vec<Event> = (0..25)
+        .filter_map(|i| normalize(&eve("203.0.113.9", "192.168.1.20", 443, "ET SCAN probe", 9, 2, "", "allowed", i)))
+        .collect();
+    store.add_events(&evs, "api").unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 10, 20, 12, 0, 0).unwrap();
+    assert_eq!(store.undropped_alerts(now).unwrap(), Some(25));
+
+    // Applying the Drop policy afterwards clears the warning until new alerts arrive.
+    let applied = Utc.with_ymd_and_hms(2026, 10, 19, 13, 0, 0).unwrap();
+    store.set_kv(ipswatch::ipspolicy::APPLIED_KV, &ipswatch::iso(applied)).unwrap();
+    assert_eq!(store.undropped_alerts(now).unwrap(), None);
+
+    // Removing the policy brings the old alerts back into the count.
+    store.delete_kv(ipswatch::ipspolicy::APPLIED_KV).unwrap();
+    assert_eq!(store.undropped_alerts(now).unwrap(), Some(25));
+}

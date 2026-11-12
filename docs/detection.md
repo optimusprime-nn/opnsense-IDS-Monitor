@@ -68,7 +68,7 @@ problem goes away. See [Health](gui/health.html) and [DNS](gui/dns.html).
   category, so ET/ETPRO EXPLOIT, MALWARE, TROJAN and CNC count as high, and SCAN, DROP and TOR as medium.
 - **Firewall-log correlation is strict.** It only counts *inbound* passes inside the alert window, and skips
   broadcast / multicast and routine ports (DNS, DHCP, NTP, NetBIOS, SSDP, mDNS; editable).
-- **A banner warns when the IPS hasn't dropped anything for a week**: IPS mode is off, or no policy is set to Drop.
+- **A banner warns when the IPS hasn't dropped anything for a week**: IPS mode is off, or no policy is set to Drop. Applying the Drop policy clears it; it only comes back if the next 20 alerts are all let through too.
 - **Re-score after changing rules**: *Settings → Data & storage → Re-score all findings*, or `ipswatch-cli rescore`.
   Your acknowledged and false-positive marks are kept.
 
