@@ -36,6 +36,7 @@ In *System → Access → Users*, create a dedicated user and give it only what 
 | IPS alerts (required) | Intrusion Detection, firewall log (*Diagnostics: Firewall Log*) |
 | Health checks | Gateways, Services, Diagnostics (system, ARP), Firewall rules / NAT, DHCP leases, Configuration history |
 | CrowdSec | the os-crowdsec plugin pages |
+| Troubleshoot | the Health checks pages, plus *Diagnostics: Logs* (gateway log), *System: Firmware*, Interfaces settings; for its fixes *Status: Services* |
 | Unbound DNS checks | Unbound DNS settings, reporting overview and diagnostics |
 | Blocking IPs | *Firewall: Alias* |
 | Drop policy | Intrusion Detection (write) |

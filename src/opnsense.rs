@@ -108,6 +108,22 @@ impl OPNsense {
         serde_json::from_str(&text).with_context(|| format!("{method} {path}: response is not JSON"))
     }
 
+    /// The firewall's own clock, from the HTTP `Date` header of a cheap API call.
+    pub fn server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+        let url = format!("{}/api/diagnostics/system/system_time", self.base);
+        let resp = self
+            .agent
+            .get(&url)
+            .set("Authorization", &self.auth)
+            .set("Accept", "application/json")
+            .call()
+            .map_err(|e| anyhow!("GET diagnostics/system/system_time: {e}"))?;
+        let date = resp.header("Date").ok_or_else(|| anyhow!("the firewall sent no Date header"))?;
+        Ok(chrono::DateTime::parse_from_rfc2822(date)
+            .with_context(|| format!("unreadable Date header {date:?}"))?
+            .with_timezone(&chrono::Utc))
+    }
+
     /// Raw GET of any API path (diagnostics).
     pub fn get_raw(&self, path: &str) -> Result<Value> {
         self.req("GET", path, None, &[])

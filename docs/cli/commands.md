@@ -133,6 +133,21 @@ Options:
       --no-exposure  Skip the firewall exposure audit (port forwards to the DNS servers)
 ```
 
+### troubleshoot
+
+Finds why the internet or a site isn't working: the firewall clock, stopped services, IPS and Zenarmor
+inspection, WAN drop-outs, blocked traffic, the sites in `troubleshoot.sites`, and what changed since
+the baseline. Read-only unless you pass `--fix`.
+
+```powershell
+ipswatch-cli troubleshoot                    # report
+ipswatch-cli troubleshoot --fix 1            # preview fix 1
+ipswatch-cli troubleshoot --fix 1 --yes      # apply fix 1
+ipswatch-cli troubleshoot --mark-baseline    # current settings become the baseline
+```
+
+See [Troubleshoot](../gui/troubleshoot.html) for what each check means.
+
 ## Firewall changes
 
 These change the firewall or DNS servers. Each one does a **dry run** by default and changes nothing until you add
