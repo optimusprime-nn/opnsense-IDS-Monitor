@@ -175,7 +175,7 @@ Titled *"Potential unwanted access from X"* if traffic got through to a host beh
 - **Firewall-log correlation is strict.** It only counts *inbound* passes inside the alert window, and skips
   broadcast/multicast and routine ports (DNS, DHCP, NTP, NetBIOS, SSDP, mDNS; editable).
 - **A banner warns when the IPS hasn't dropped anything for a week.** That means IPS mode is off or no policy is
-  set to Drop.
+  set to Drop. Applying the Drop policy clears it; it only comes back if the next 20 alerts are all let through too.
 - **Re-score after changing rules.** Use *Settings → Data & storage → Re-score all findings* or
   `ipswatch-cli rescore`. It keeps your acknowledged and false-positive marks.
 
