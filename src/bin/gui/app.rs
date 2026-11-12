@@ -22,6 +22,7 @@ enum Tab {
     Findings,
     Health,
     Dns,
+    Troubleshoot,
     Events,
     Log,
     Settings,
@@ -116,6 +117,9 @@ enum Bg {
     Health(Result<(), String>),
     Dns(Option<String>),
     PolicyPlan(Result<ipswatch::ipspolicy::Plan, String>),
+    Troubleshoot(Result<ipswatch::troubleshoot::Report, String>),
+    /// A troubleshoot fix finished; re-run the checks afterwards.
+    Fixed(Result<String, String>),
     Reload,
 }
 
@@ -173,6 +177,23 @@ pub struct App {
     f_kind: KindFilter,
     health_busy: bool,
     dns_busy: bool,
+    ts_report: Option<ipswatch::troubleshoot::Report>,
+    ts_busy: bool,
+    /// Editable "sites that must work" list (one per line).
+    ts_sites: String,
+}
+
+/// Remember when the Drop policy was applied (or forget it when removed), so the
+/// "not dropping" warning starts counting again from now.
+fn record_policy_change(store: &ipswatch::store::Store, applied: bool) {
+    let r = if applied {
+        store.set_kv(ipswatch::ipspolicy::APPLIED_KV, &ipswatch::iso(chrono::Utc::now()))
+    } else {
+        store.delete_kv(ipswatch::ipspolicy::APPLIED_KV)
+    };
+    if let Err(e) = r {
+        log::warn!("Could not record the Drop policy change: {e:#}");
+    }
 }
 
 /// A finding as plain text, for the clipboard.
@@ -282,6 +303,10 @@ impl App {
             f_kind: KindFilter::All,
             health_busy: false,
             dns_busy: false,
+            ts_report: None,
+            ts_busy: false,
+            ts_sites: cfg.troubleshoot.sites.join("
+"),
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -300,6 +325,7 @@ impl App {
                 "events" => Tab::Events,
                 "health" => Tab::Health,
                 "dns" => Tab::Dns,
+                "troubleshoot" => Tab::Troubleshoot,
                 "log" => Tab::Log,
                 "settings" => Tab::Settings,
                 _ => Tab::Findings,
@@ -340,11 +366,7 @@ impl App {
         let since = ipswatch::iso(chrono::Utc::now() - chrono::Duration::hours(24));
         self.events_24h = store.event_count_since(&since).unwrap_or(0);
         self.events = store.recent_events(2000, &self.e_search).unwrap_or_default();
-        let week = ipswatch::iso(chrono::Utc::now() - chrono::Duration::days(7));
-        self.not_dropping = match store.action_counts_since(&week) {
-            Ok((total, 0)) if total >= 20 => Some(total),
-            _ => None,
-        };
+        self.not_dropping = store.undropped_alerts(chrono::Utc::now()).ok().flatten();
         self.settings.own_ips = engine::own_addresses(store).iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
         self.loaded_version = self.ctl.shared.data_version.load(Ordering::Relaxed);
         self.last_reload = Instant::now();
@@ -623,6 +645,42 @@ impl App {
         });
     }
 
+    /// Run every troubleshooting check (read-only, in the background).
+    fn run_troubleshoot(&mut self) {
+        let cfg = self.ctl.cfg();
+        if cfg.opnsense.url.is_empty() {
+            self.message("Troubleshoot", "Configure the firewall connection in Settings first.", true);
+            return;
+        }
+        self.ts_busy = true;
+        let shared = self.ctl.shared.clone();
+        self.spawn(move || {
+            Bg::Troubleshoot(
+                OPNsense::new(&cfg.opnsense)
+                    .and_then(|api| ipswatch::troubleshoot::run(&cfg, &shared.store, &api))
+                    .map_err(|e| format!("{e:#}")),
+            )
+        });
+    }
+
+    /// Show what a fix will do, ask, and apply it in the background.
+    fn apply_fix(&mut self, fix: ipswatch::troubleshoot::Fix) {
+        let yes = rfd::MessageDialog::new()
+            .set_title(fix.label())
+            .set_description(format!("{}
+
+Go ahead?", fix.preview()))
+            .set_level(rfd::MessageLevel::Warning)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if yes != rfd::MessageDialogResult::Yes {
+            return;
+        }
+        self.ts_busy = true;
+        let cfg = self.ctl.cfg();
+        self.spawn(move || Bg::Fixed(OPNsense::new(&cfg.opnsense).and_then(|api| fix.apply(&api)).map_err(|e| format!("{e:#}"))));
+    }
+
     /// Run the DNS checks now (in the background).
     fn check_dns(&mut self) {
         let cfg = self.ctl.cfg();
@@ -720,6 +778,7 @@ impl App {
         }
         self.policy_busy = true;
         let cfg = self.ctl.cfg();
+        let shared = self.ctl.shared.clone();
         self.spawn(move || {
             let r = OPNsense::new(&cfg.opnsense).and_then(|api| {
                 if act == "apply" {
@@ -728,6 +787,10 @@ impl App {
                     ipswatch::ipspolicy::remove(&api)
                 }
             });
+            if r.is_ok() {
+                record_policy_change(&shared.store, act == "apply");
+                shared.data_version.fetch_add(1, Ordering::Relaxed);
+            }
             match r {
                 Ok(msg) => Bg::Message { title: "Firewall IPS policy".into(), text: msg, error: false },
                 Err(e) => Bg::Message { title: "Firewall IPS policy".into(), text: format!("{e:#}"), error: true },
@@ -857,7 +920,7 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
-                for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Dns, "DNS"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log")] {
+                for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Dns, "DNS"), (Tab::Troubleshoot, "Troubleshoot"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log")] {
                     if ui.selectable_label(self.tab == t, l).clicked() {
                         ui.close_menu();
                         self.tab = t;
@@ -953,7 +1016,7 @@ impl App {
                 self.ctl.poll_now();
             }
             ui.separator();
-            for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Dns, "DNS"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log"), (Tab::Settings, "Settings")] {
+            for (t, l) in [(Tab::Findings, "Findings"), (Tab::Health, "Health"), (Tab::Dns, "DNS"), (Tab::Troubleshoot, "Troubleshoot"), (Tab::Events, "IPS events"), (Tab::Log, "Activity log"), (Tab::Settings, "Settings")] {
                 if ui.selectable_label(self.tab == t, RichText::new(l).size(15.0)).clicked() {
                     self.tab = t;
                 }
@@ -1451,6 +1514,25 @@ impl eframe::App for App {
                         self.message = Some(("DNS check".into(), e, true));
                     }
                 }
+                Bg::Troubleshoot(r) => {
+                    self.ts_busy = false;
+                    match r {
+                        Ok(rep) => self.ts_report = Some(rep),
+                        Err(e) => self.message = Some(("Troubleshoot".into(), e, true)),
+                    }
+                }
+                Bg::Fixed(r) => {
+                    self.ts_busy = false;
+                    match r {
+                        Ok(t) => {
+                            self.message = Some(("Fix applied".into(), format!("{t}
+
+Checking again..."), false));
+                            self.run_troubleshoot();
+                        }
+                        Err(e) => self.message = Some(("Fix failed".into(), e, true)),
+                    }
+                }
                 Bg::PolicyPlan(p) => {
                     self.policy_busy = false;
                     if self.policy.is_some() {
@@ -1526,6 +1608,32 @@ impl eframe::App for App {
                         self.reload();
                     }
                     crate::health_view::Action::None => {}
+                }
+            }
+            Tab::Troubleshoot => {
+                let report = self.ts_report.clone();
+                match crate::troubleshoot_view::show(ui, report.as_ref(), self.ts_busy, &mut self.ts_sites) {
+                    crate::troubleshoot_view::Action::Run => self.run_troubleshoot(),
+                    crate::troubleshoot_view::Action::Fix(f) => self.apply_fix(f),
+                    crate::troubleshoot_view::Action::MarkBaseline => match ipswatch::troubleshoot::set_baseline(&self.ctl.shared.store) {
+                        Ok(()) => {
+                            self.message("Baseline", "The current firewall settings are now the baseline. Later runs show only changes from here.", false);
+                            self.run_troubleshoot();
+                        }
+                        Err(e) => self.message("Baseline", format!("{e:#}"), true),
+                    },
+                    crate::troubleshoot_view::Action::SaveSites(list) => {
+                        let mut cfg = self.ctl.cfg();
+                        cfg.troubleshoot.sites = list;
+                        match config::save(&cfg, &self.ctl.cfg_path) {
+                            Ok(()) => {
+                                *self.ctl.shared.cfg.write().unwrap_or_else(|e| e.into_inner()) = cfg;
+                                self.message("Troubleshoot", "Saved. They're tested on the next run.", false);
+                            }
+                            Err(e) => self.message("Troubleshoot", format!("Could not save: {e:#}"), true),
+                        }
+                    }
+                    crate::troubleshoot_view::Action::None => {}
                 }
             }
             Tab::Dns => {

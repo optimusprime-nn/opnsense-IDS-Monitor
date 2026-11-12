@@ -465,6 +465,10 @@ pub fn apply_disable(api: &OPNsense, plan: &DisablePlan) -> Result<String> {
     Ok(msg)
 }
 
+/// kv key holding when the Drop policy was last applied (ISO time), so the "not dropping" warning
+/// only looks at alerts seen since then.
+pub const APPLIED_KV: &str = "ips_policy_applied_at";
+
 /// Create or update the policy from a plan, then reload Suricata.
 pub fn apply(api: &OPNsense, plan: &Plan) -> Result<String> {
     let verb = save_policy(api, plan)?;

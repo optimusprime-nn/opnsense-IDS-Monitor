@@ -14,6 +14,7 @@ permalink: /gui/
 | [Findings](findings.html) | Everything that needs a look: IPS findings plus health, DNS, exposure, device and config findings |
 | [Health](health.html) | The firewall: gateways, resources, services, exposure audit, CrowdSec, devices, config changes |
 | [DNS](dns.html) | Each DNS server: up / down, traffic, failures, blocklists, top clients, WAN exposure |
+| [Troubleshoot](troubleshoot.html) | One button that finds why the internet or a site isn't working, explains it and offers fixes |
 | [IPS events and log](events-and-log.html) | Raw IPS alerts, and the app's own activity log |
 | [Settings](settings.html) | Every option, in ten sections |
 

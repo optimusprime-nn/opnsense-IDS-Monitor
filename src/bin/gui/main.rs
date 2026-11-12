@@ -6,6 +6,7 @@ mod dns_view;
 mod health_view;
 mod settings;
 mod tray;
+mod troubleshoot_view;
 mod win;
 
 use std::path::PathBuf;

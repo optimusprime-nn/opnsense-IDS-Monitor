@@ -141,6 +141,25 @@ url = ""                        # optional: address for test queries; empty = th
 CLI: `ipswatch-cli dns` runs the DNS checks once and prints a summary. `dump-dns` and `dns-blocklists`
 are Technitium-only; for Unbound use `dump-api unbound/overview/totals/10` and the like.
 
+## Troubleshoot
+
+When the internet or one site stops working, open **Troubleshoot** and click **Find problems**. In plain
+language, worst first, it reports:
+
+- a wrong firewall clock (for example after restoring a VM snapshot) and competing time services
+- stopped services
+- Suricata IPS and Zenarmor both inline, or hardware offloading left on with inline IPS
+- WAN drop-outs and packet loss from the gateway monitor
+- your own devices' traffic blocked by a rule, or cut because the firewall lost track of the connection
+- sites that must work (claude.ai, api.anthropic.com... editable), each tested from your PC, with the
+  cause when the firewall log or IPS alerts show one
+- what changed since a baseline, which is kept automatically from just before a firmware update
+
+Checking is read-only. Restarting a service and resyncing the clock can be done with one click, after a
+preview and confirmation; everything else comes with steps. On the command line:
+`ipswatch-cli troubleshoot [--fix N --yes] [--mark-baseline]`.
+See the [Troubleshoot page](https://optimusprime-nn.github.io/opnsense-IDS-Monitor/gui/troubleshoot.html) in the docs.
+
 ## What gets flagged
 
 Events are grouped per actor inside a sliding window (default 15 min) and scored. A finding is raised
@@ -175,7 +194,7 @@ Titled *"Potential unwanted access from X"* if traffic got through to a host beh
 - **Firewall-log correlation is strict.** It only counts *inbound* passes inside the alert window, and skips
   broadcast/multicast and routine ports (DNS, DHCP, NTP, NetBIOS, SSDP, mDNS; editable).
 - **A banner warns when the IPS hasn't dropped anything for a week.** That means IPS mode is off or no policy is
-  set to Drop.
+  set to Drop. Applying the Drop policy clears it; it only comes back if the next 20 alerts are all let through too.
 - **Re-score after changing rules.** Use *Settings → Data & storage → Re-score all findings* or
   `ipswatch-cli rescore`. It keeps your acknowledged and false-positive marks.
 

@@ -74,6 +74,19 @@ enum Cmd {
     },
     /// Run the firewall health, exposure, device and config checks once and print the result
     Health,
+    /// Find out why the internet or a site isn't working: clock, gateways, blocked traffic, IPS,
+    /// sites that must work and what changed since the baseline. Read-only unless --fix is given.
+    Troubleshoot {
+        /// Apply the fix offered for problem number N (from the list); needs --yes
+        #[arg(long)]
+        fix: Option<usize>,
+        /// Confirm --fix
+        #[arg(long)]
+        yes: bool,
+        /// Make the current firewall settings the baseline that later runs compare against
+        #[arg(long)]
+        mark_baseline: bool,
+    },
     /// Check the DNS servers (Technitium / Unbound) once and print the result
     Dns {
         /// Skip the firewall exposure audit (port forwards to the DNS servers)
@@ -337,15 +350,47 @@ fn run() -> Result<()> {
             if remove {
                 anyhow::ensure!(yes, "Removing changes the firewall: add --yes to confirm.");
                 println!("{}", ipswatch::ipspolicy::remove(&a)?);
+                store.delete_kv(ipswatch::ipspolicy::APPLIED_KV)?;
             } else {
                 let plan = ipswatch::ipspolicy::plan(&a, &cfg.ips_policy.rulesets)?;
                 println!("{}", plan.render());
                 if apply {
                     anyhow::ensure!(yes, "\nThis was a dry run. Add --yes to apply it.");
                     println!("\n{}", ipswatch::ipspolicy::apply(&a, &plan)?);
+                    store.set_kv(ipswatch::ipspolicy::APPLIED_KV, &ipswatch::iso(chrono::Utc::now()))?;
                 } else {
                     println!("\nDRY RUN - nothing was changed. Apply with: ipswatch-cli ips-policy --apply --yes");
                 }
+            }
+        }
+        Cmd::Troubleshoot { fix, yes, mark_baseline } => {
+            let a = api()?;
+            let rep = ipswatch::troubleshoot::run(&cfg, &store, &a)?;
+            if mark_baseline {
+                ipswatch::troubleshoot::set_baseline(&store)?;
+                println!("The current firewall settings are now the baseline.");
+                return Ok(());
+            }
+            println!("{}", rep.render());
+            let fixable: Vec<&ipswatch::troubleshoot::Issue> = rep.issues.iter().filter(|i| i.fix.is_some()).collect();
+            if !fixable.is_empty() {
+                println!("
+Fixes IPS Watch can apply:");
+                for (n, i) in fixable.iter().enumerate() {
+                    println!("  {}. {}  ({})", n + 1, i.fix.as_ref().map(|f| f.label()).unwrap_or_default(), i.title);
+                }
+            }
+            if let Some(n) = fix {
+                let f = fixable.get(n.wrapping_sub(1)).and_then(|i| i.fix.clone()).ok_or_else(|| anyhow::anyhow!("there is no fix number {n}"))?;
+                println!("
+{}", f.preview());
+                anyhow::ensure!(yes, "
+This was a dry run. Add --yes to apply it.");
+                println!("
+{}", f.apply(&a)?);
+            } else if !fixable.is_empty() {
+                println!("
+Preview one with: ipswatch-cli troubleshoot --fix N   (apply with --yes)");
             }
         }
         Cmd::Health => {
