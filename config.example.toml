@@ -1,4 +1,4 @@
-# ipswatch configuration (written by IPS Watch 1.0.0)
+# ipswatch configuration (written by IPS Watch 1.1.0)
 db_path = "ipswatch.db"
 poll_seconds = 60
 retention_days = 30
@@ -210,6 +210,16 @@ allow_http = false
 # name = "firewall"
 # kind = "unbound"
 # url = ""
+
+[troubleshoot]
+sites = [
+    "claude.ai",
+    "api.anthropic.com",
+    "cloudflare.com",
+    "google.com",
+]
+log_rows = 3000
+clock_tolerance_seconds = 120
 
 [gui]
 theme = "dark"
