@@ -1,4 +1,4 @@
-# ipswatch configuration (written by IPS Watch 1.2.0)
+# ipswatch configuration (written by IPS Watch 1.2.1)
 db_path = "ipswatch.db"
 poll_seconds = 60
 retention_days = 30

@@ -129,7 +129,7 @@ impl OPNsense {
         self.req("GET", path, None, &[])
     }
 
-    /// Raw DELETE (removing a CrowdSec decision).
+    /// Raw DELETE (removing a CrowdSec decision on older plugin versions).
     pub fn delete_raw(&self, path: &str) -> Result<Value> {
         self.req("DELETE", path, None, &[])
     }

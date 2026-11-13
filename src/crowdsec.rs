@@ -268,9 +268,17 @@ pub fn unblock(api: &OPNsense, ip: &str) -> Result<String> {
     ip.parse::<std::net::IpAddr>().map_err(|_| anyhow::anyhow!("'{ip}' is not an IP address"))?;
     let mut done = vec![];
     for (id, reason) in decisions_for(&search(api, "decisions")?, ip) {
-        let v = api.delete_raw(&format!("crowdsec/decisions/del/{id}"))?;
+        // The plugin's delAction only acts on POST (it advertises DELETE, but anything other than
+        // POST makes it return nothing, which PHP turns into a 500). Older versions took DELETE.
+        let path = format!("crowdsec/decisions/del/{id}");
+        let v = match api.post_raw(&path, json!({})) {
+            Ok(v) => v,
+            Err(e) if e.to_string().contains("405") => api.delete_raw(&path)?,
+            Err(e) => return Err(e),
+        };
         let r = s(&v, "result");
-        if !r.is_empty() && r != "deleted" && r != "ok" {
+        // "not found": already gone (expired or removed); the check at the end confirms it.
+        if !r.is_empty() && r != "deleted" && r != "ok" && r != "not found" {
             anyhow::bail!("removing CrowdSec decision {id}: the firewall answered {v}");
         }
         done.push(format!("ban removed ({reason})"));
