@@ -262,6 +262,11 @@ impl Store {
         }
     }
 
+    /// Quick structural check of the database (cheap; run hourly).
+    pub fn check_integrity(&self) -> Result<()> {
+        quick_check(&self.conn())
+    }
+
     /// Once a day: check the database and write a compact copy to `backups\ipswatch-YYYYMMDD.db`,
     /// keeping the newest BACKUPS_KEPT. A damaged database is never backed up, so bad copies
     /// never push out good ones. Returns the new file when one was written.

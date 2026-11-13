@@ -28,6 +28,19 @@ use chrono::{DateTime, Local, Utc};
 
 /// Fixed-width UTC timestamp so string comparison == time comparison.
 /// Same format as the earlier Python version, so existing databases stay compatible.
+/// Stack for IPS Watch's own threads. The default (2 MiB, 1 MiB for the main thread on
+/// Windows) has proven too small; a stack overflow kills the whole app without a trace.
+pub const THREAD_STACK: usize = 16 * 1024 * 1024;
+
+/// Start a named thread with a generous stack. The name shows in crash reports and dumps.
+pub fn spawn_thread<F, T>(name: &str, f: F) -> std::thread::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new().name(name.to_string()).stack_size(THREAD_STACK).spawn(f).expect("starting a thread")
+}
+
 pub fn iso(dt: DateTime<Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
 }

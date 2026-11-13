@@ -225,7 +225,7 @@ impl SyslogReceiver {
             let stop2 = stop.clone();
             let open = Arc::new(AtomicUsize::new(0));
             let counters2 = counters.clone();
-            std::thread::spawn(move || {
+            crate::spawn_thread("syslog-tcp", move || {
                 while !stop2.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((sock, peer)) => {
@@ -238,7 +238,7 @@ impl SyslogReceiver {
                             }
                             open.fetch_add(1, Ordering::Relaxed);
                             let (push, stop3, open2, counters3) = (push.clone(), stop2.clone(), open.clone(), counters2.clone());
-                            std::thread::spawn(move || {
+                            crate::spawn_thread("syslog-conn", move || {
                                 read_tcp(sock, &stop3, &counters3, &push);
                                 open2.fetch_sub(1, Ordering::Relaxed);
                             });
@@ -255,7 +255,7 @@ impl SyslogReceiver {
             let sock = UdpSocket::bind(&addr)?;
             sock.set_read_timeout(Some(Duration::from_millis(500)))?;
             let stop2 = stop.clone();
-            std::thread::spawn(move || {
+            crate::spawn_thread("syslog-udp", move || {
                 let mut b = vec![0u8; 65536];
                 while !stop2.load(Ordering::Relaxed) {
                     if let Ok((n, peer)) = sock.recv_from(&mut b) {

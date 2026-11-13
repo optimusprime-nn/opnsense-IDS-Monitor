@@ -126,6 +126,7 @@ impl Monitor {
         let (tx, rx) = channel();
         let join = std::thread::Builder::new()
             .name("monitor".into())
+            .stack_size(crate::THREAD_STACK)
             .spawn(move || {
                 let cfg = shared.cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
                 let api = if cfg.opnsense.url.trim().is_empty() {
@@ -171,6 +172,8 @@ impl Monitor {
                 let mut last_health: Option<Instant> = None;
                 let mut last_dns: Option<Instant> = None;
                 let mut down_since: Option<chrono::DateTime<chrono::Utc>> = None;
+                // Set when the hourly integrity check finds the database damaged.
+                let mut db_damaged: Option<String> = None;
                 loop {
                     let mut added = 0;
                     let mut err = None;
@@ -243,10 +246,26 @@ impl Monitor {
                                 info!("pruned {n} old events (older than {} days or beyond {} events)", cfg.retention_days, cfg.max_events);
                             }
                         }
-                        match shared.store.backup_if_due() {
-                            Ok(Some(f)) => info!("database backed up to {}", f.display()),
-                            Ok(None) => {}
-                            Err(e) => error!("database backup failed: {e:#}"),
+                        match shared.store.check_integrity() {
+                            Ok(()) => db_damaged = None,
+                            Err(e) => {
+                                error!("The database is damaged: {e:#}. Restart IPS Watch to repair it from the last backup.");
+                                if db_damaged.is_none() {
+                                    #[cfg(windows)]
+                                    crate::toast::show_message(
+                                        "IPS Watch: database damaged",
+                                        "Restart IPS Watch (tray menu > Quit, then start it) to repair it from the last backup.",
+                                    );
+                                }
+                                db_damaged = Some("The database is damaged - restart IPS Watch to repair it".into());
+                            }
+                        }
+                        if db_damaged.is_none() {
+                            match shared.store.backup_if_due() {
+                                Ok(Some(f)) => info!("database backed up to {}", f.display()),
+                                Ok(None) => {}
+                                Err(e) => error!("database backup failed: {e:#}"),
+                            }
                         }
                         last_prune = Instant::now();
                     }
@@ -254,7 +273,7 @@ impl Monitor {
                         s.last_poll = Some(chrono::Local::now().format("%H:%M:%S").to_string());
                         s.last_added = added;
                         // A collection gap is shown like an error until the history has caught up.
-                        s.last_error = err.or_else(|| collect::collection_gap(&shared.store));
+                        s.last_error = db_damaged.clone().or(err).or_else(|| collect::collection_gap(&shared.store));
                     });
                     (shared.on_cycle)();
                     match rx.recv_timeout(Duration::from_secs(cfg.poll_seconds.max(10))) {

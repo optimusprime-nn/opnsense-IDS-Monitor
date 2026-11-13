@@ -823,7 +823,7 @@ pub fn run(cfg: &Config, store: &Store, api: &OPNsense) -> Result<Report> {
     let mut rep = Report { at: crate::local_time(&crate::iso(Utc::now())), ..Default::default() };
     // Site checks from this PC run while the firewall is queried.
     let sites = cfg.troubleshoot.sites.clone();
-    let site_thread = std::thread::spawn(move || {
+    let site_thread = crate::spawn_thread("site-checks", move || {
         sites.iter().filter(|x| !x.trim().is_empty()).map(|x| check_site(x, Duration::from_secs(6))).collect::<Vec<_>>()
     });
     rep.firmware = api
