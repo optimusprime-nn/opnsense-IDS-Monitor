@@ -41,7 +41,7 @@ log = "0.4"
 native-tls = "0.2"
 open = { version = "5", optional = true }
 rfd = { version = "0.15", optional = true }
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1_smol = "1"
