@@ -395,6 +395,12 @@ pub struct CrowdsecCfg {
     pub bouncer_stale_minutes: u32,
     /// Add points to IPS findings whose source CrowdSec has banned.
     pub boost_ips: bool,
+    /// Alert when CrowdSec blocks your own devices, addresses they connect to, or the
+    /// troubleshoot "sites that must work".
+    pub watch_blocking: bool,
+    /// Addresses / networks CrowdSec must never block. IPS Watch lifts any CrowdSec ban or
+    /// blocklist entry for them on every health check and tells you it did.
+    pub allow: Vec<String>,
 }
 
 impl Default for CrowdsecCfg {
@@ -404,6 +410,8 @@ impl Default for CrowdsecCfg {
             finding_scenarios: ["-bf", "bruteforce", "cve-", "exploit", "backdoor"].map(String::from).to_vec(),
             bouncer_stale_minutes: 10,
             boost_ips: true,
+            watch_blocking: true,
+            allow: vec![],
         }
     }
 }
@@ -607,6 +615,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.detect.nets()?;
         parse_nets(&self.block.never_block).context("Never block")?;
+        parse_nets(&self.crowdsec.allow).context("CrowdSec always allow")?;
         if self.poll_seconds < 10 {
             bail!("Poll interval must be at least 10 seconds");
         }

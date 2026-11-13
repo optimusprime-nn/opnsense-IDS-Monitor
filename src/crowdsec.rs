@@ -5,13 +5,17 @@
 //! * Findings: alerts for serious scenarios (brute force, CVE/exploit attempts) become
 //!   findings; routine ones (port scans) are only counted on the Health page.
 //! * IPS scoring: active bans are cached so IPS findings from a banned IP say so.
+//! * Blocking watch: alerts when CrowdSec blocks your own devices, addresses your devices
+//!   connect to (from the firewall log), or the troubleshoot "sites that must work".
+//! * Overrides: [`unblock`] lifts a ban / blocklist entry; addresses on the always-allow list
+//!   (`crowdsec.allow`) are lifted automatically on every check.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::config::{Config, Severity};
+use crate::config::{in_nets, parse_nets, Config, Severity};
 use crate::health::Problem;
 use crate::opnsense::OPNsense;
 use crate::store::Store;
@@ -132,6 +136,12 @@ pub fn check(cfg: &Config, store: &Store, api: &OPNsense, out: &mut Vec<Problem>
         );
     }
     store.set_kv("crowdsec_bans", &serde_json::to_string(&bans)?)?;
+    if st.running {
+        enforce_allow(cfg, api, &decisions, out);
+        if cfg.crowdsec.watch_blocking {
+            watch_blocking(cfg, api, &decisions, out);
+        }
+    }
 
     // The bouncer's firewall tables hold everything that is really blocked, including the
     // community blocklist, which the plugin's decision list doesn't show.
@@ -202,6 +212,200 @@ pub fn check(cfg: &Config, store: &Store, api: &OPNsense, out: &mut Vec<Problem>
     Ok(Some(st))
 }
 
+fn is_crowdsec_list(alias: &str) -> bool {
+    alias.to_lowercase().starts_with("crowdsec")
+}
+
+/// CrowdSec blocklist tables holding `ip` on the firewall.
+fn crowdsec_lists(api: &OPNsense, ip: &str) -> Vec<String> {
+    api.aliases_containing(ip).unwrap_or_default().into_iter().filter(|a| is_crowdsec_list(a)).collect()
+}
+
+/// Local CrowdSec decisions (bans) covering `ip`: (decision id, reason).
+fn decisions_for(decisions: &[Value], ip: &str) -> Vec<(i64, String)> {
+    decisions
+        .iter()
+        .filter(|d| {
+            let v = ip_of(&s(d, "scope_value"));
+            v == ip || v.strip_prefix("Range:").and_then(|r| parse_nets(&[r.to_string()]).ok()).is_some_and(|n| in_nets(ip, &n))
+        })
+        .filter_map(|d| d.get("id").and_then(Value::as_i64).map(|id| (id, s(d, "reason"))))
+        .collect()
+}
+
+fn how_blocked(bans: &[(i64, String)], lists: &[String]) -> Vec<String> {
+    bans.iter().map(|(_, r)| format!("ban ({r})")).chain(lists.iter().map(|a| format!("blocklist {a}"))).collect()
+}
+
+/// Is `ip` blocked by CrowdSec right now? Returns how (empty = not blocked).
+pub fn blocked_by(api: &OPNsense, ip: &str) -> Vec<String> {
+    let bans = search(api, "decisions").map(|d| decisions_for(&d, ip)).unwrap_or_default();
+    how_blocked(&bans, &crowdsec_lists(api, ip))
+}
+
+/// What [`unblock`] will do, for the confirmation dialog. Changes nothing.
+pub fn unblock_preview(api: &OPNsense, ip: &str, always: bool) -> String {
+    let how = blocked_by(api, ip);
+    let mut t = if how.is_empty() {
+        format!("CrowdSec isn't blocking {ip} right now.")
+    } else {
+        format!("CrowdSec is blocking {ip}: {}.\n\nIPS Watch will remove the ban / blocklist entry so traffic flows again.", how.join(", "))
+    };
+    if always {
+        t += &format!(
+            "\n\n{ip} will also go on IPS Watch's CrowdSec always-allow list: if CrowdSec blocks it again (a new ban or the next \
+             blocklist download), IPS Watch lifts it on its next health check and tells you."
+        );
+    } else if !how.is_empty() {
+        t += "\n\nA blocklist entry can come back with the next blocklist download. Use 'Always allow' to keep it unblocked.";
+    }
+    t
+}
+
+/// Lift every CrowdSec block on `ip`: delete its local decisions and remove it from the
+/// CrowdSec blocklist tables. Only call after the user confirmed [`unblock_preview`].
+pub fn unblock(api: &OPNsense, ip: &str) -> Result<String> {
+    ip.parse::<std::net::IpAddr>().map_err(|_| anyhow::anyhow!("'{ip}' is not an IP address"))?;
+    let mut done = vec![];
+    for (id, reason) in decisions_for(&search(api, "decisions")?, ip) {
+        let v = api.delete_raw(&format!("crowdsec/decisions/del/{id}"))?;
+        let r = s(&v, "result");
+        if !r.is_empty() && r != "deleted" && r != "ok" {
+            anyhow::bail!("removing CrowdSec decision {id}: the firewall answered {v}");
+        }
+        done.push(format!("ban removed ({reason})"));
+    }
+    for alias in crowdsec_lists(api, ip) {
+        // Checked below with find_references (the alias listing is paged).
+        let v = api.post_raw(&format!("firewall/alias_util/delete/{alias}"), json!({"address": ip}))?;
+        let st = s(&v, "status");
+        if !st.is_empty() && st != "done" && st != "ok" {
+            anyhow::bail!("removing {ip} from {alias}: the firewall answered {v}");
+        }
+        done.push(format!("removed from {alias}"));
+    }
+    let left = blocked_by(api, ip);
+    if !left.is_empty() {
+        anyhow::bail!("{ip} is still blocked after the change: {}", left.join(", "));
+    }
+    let msg = if done.is_empty() { format!("CrowdSec wasn't blocking {ip}.") } else { format!("Unblocked {ip}: {}.", done.join(", ")) };
+    log::warn!("CrowdSec override: {msg}");
+    Ok(msg)
+}
+
+/// Lift blocks on always-allowed addresses, and say so.
+fn enforce_allow(cfg: &Config, api: &OPNsense, decisions: &[Value], out: &mut Vec<Problem>) {
+    let Ok(allow) = parse_nets(&cfg.crowdsec.allow) else { return };
+    if allow.is_empty() {
+        return;
+    }
+    let mut ips: Vec<String> = decisions.iter().map(|d| ip_of(&s(d, "scope_value"))).filter(|ip| in_nets(ip, &allow)).collect();
+    // Single addresses on the list are also checked against the blocklist tables.
+    ips.extend(allow.iter().filter(|n| n.prefix_len() == n.max_prefix_len()).map(|n| n.addr().to_string()));
+    ips.sort();
+    ips.dedup();
+    for ip in ips {
+        if blocked_by(api, &ip).is_empty() {
+            continue;
+        }
+        let (sev, reasons) = match unblock(api, &ip) {
+            Ok(m) => (Severity::Low, vec![m, "it's on your CrowdSec always-allow list (Settings > Health checks)".into()]),
+            Err(e) => (Severity::High, vec![format!("IPS Watch could not lift the block: {e:#}"), "it's on your CrowdSec always-allow list".into()]),
+        };
+        out.push(Problem {
+            key: format!("crowdsec:allowed:{ip}"),
+            kind: "crowdsec",
+            severity: sev,
+            title: format!("CrowdSec blocked {ip} (always allowed) - {}", if sev == Severity::Low { "lifted" } else { "COULD NOT lift" }),
+            reasons,
+            targets: vec![ip],
+        });
+    }
+}
+
+/// Raise findings when CrowdSec blocks something you need.
+fn watch_blocking(cfg: &Config, api: &OPNsense, decisions: &[Value], out: &mut Vec<Problem>) {
+    use std::collections::BTreeSet;
+    let Ok(nets) = cfg.detect.nets() else { return };
+    let allow = parse_nets(&cfg.crowdsec.allow).unwrap_or_default();
+    let mut flagged = BTreeSet::new();
+    let mut raise = |out: &mut Vec<Problem>, ip: &str, sev: Severity, title: String, mut reasons: Vec<String>| {
+        if in_nets(ip, &allow) || !flagged.insert(ip.to_string()) {
+            return;
+        }
+        reasons.push("if you need it: open this finding and click 'Unblock in CrowdSec' or 'Always allow'".into());
+        out.push(Problem { key: format!("crowdsec:blocking:{ip}"), kind: "crowdsec", severity: sev, title, reasons, targets: vec![ip.to_string()] });
+    };
+    // 1. Bans on your own devices / the firewall.
+    for d in decisions.iter().filter(|d| s(d, "action") == "ban") {
+        let ip = ip_of(&s(d, "scope_value"));
+        if nets.is_internal(&ip) {
+            raise(
+                out,
+                &ip,
+                Severity::High,
+                format!("CrowdSec is blocking your own device {ip}"),
+                vec![
+                    format!("scenario {}", s(d, "reason")),
+                    format!("expires in {}", s(d, "expiration")),
+                    "this device is cut off from the firewall until the ban expires".into(),
+                ],
+            );
+        }
+    }
+    // 2. Sites that must work.
+    for site in &cfg.troubleshoot.sites {
+        let host = site.trim();
+        if host.is_empty() {
+            continue;
+        }
+        let ips: BTreeSet<String> = std::net::ToSocketAddrs::to_socket_addrs(&(host, 443)).map(|a| a.map(|x| x.ip().to_string()).collect()).unwrap_or_default();
+        for ip in ips {
+            let how = how_blocked(&decisions_for(decisions, &ip), &crowdsec_lists(api, &ip));
+            if !how.is_empty() {
+                raise(
+                    out,
+                    &ip,
+                    Severity::High,
+                    format!("CrowdSec is blocking {host} ({ip})"),
+                    vec![format!("blocked by {}", how.join(", ")), format!("{host} is on your 'sites that must work' list")],
+                );
+            }
+        }
+    }
+    // 3. Addresses your devices tried to reach and were blocked.
+    let Ok(rows) = api.firewall_log(2000) else { return };
+    let mut by_dst: BTreeMap<String, (usize, BTreeSet<String>)> = BTreeMap::new();
+    for r in &rows {
+        let (src, dst) = (s(r, "src"), s(r, "dst"));
+        let public = dst.parse::<std::net::IpAddr>().is_ok_and(|a| !a.is_multicast() && !a.is_unspecified());
+        if s(r, "action") == "block" && nets.is_internal(&src) && !nets.is_internal(&dst) && public {
+            let e = by_dst.entry(dst).or_default();
+            e.0 += 1;
+            e.1.insert(src);
+        }
+    }
+    let mut busiest: Vec<(String, (usize, BTreeSet<String>))> = by_dst.into_iter().collect();
+    busiest.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+    for (dst, (n, srcs)) in busiest.into_iter().take(40) {
+        let how = how_blocked(&decisions_for(decisions, &dst), &crowdsec_lists(api, &dst));
+        if how.is_empty() {
+            continue;
+        }
+        raise(
+            out,
+            &dst,
+            Severity::Medium,
+            format!("CrowdSec blocked your devices from reaching {dst} ({n} times)"),
+            vec![
+                format!("blocked by {}", how.join(", ")),
+                format!("from {}", srcs.into_iter().take(6).collect::<Vec<_>>().join(", ")),
+                "if something stopped working, this is the likely cause; if you don't recognise the address, leave it blocked".into(),
+            ],
+        );
+    }
+}
+
 /// Active CrowdSec bans as last cached (for IPS scoring).
 pub fn cached_bans(store: &Store) -> HashMap<String, Ban> {
     store
@@ -225,5 +429,18 @@ mod tests {
         assert!(is_serious(&cfg, "crowdsecurity/ssh-slow-bf"));
         assert!(is_serious(&cfg, "crowdsecurity/CVE-2017-9841"));
         assert!(!is_serious(&cfg, "firewallservices/pf-scan-multi_ports"));
+    }
+
+    #[test]
+    fn decisions_match_ips_and_ranges() {
+        let d = vec![
+            json!({"id": 7, "scope_value": "Ip:203.0.113.9", "reason": "ssh-bf", "action": "ban"}),
+            json!({"id": 8, "scope_value": "Range:198.51.100.0/24", "reason": "list", "action": "ban"}),
+        ];
+        assert_eq!(decisions_for(&d, "203.0.113.9"), vec![(7, "ssh-bf".to_string())]);
+        assert_eq!(decisions_for(&d, "198.51.100.77"), vec![(8, "list".to_string())]);
+        assert!(decisions_for(&d, "192.0.2.1").is_empty());
+        assert!(is_crowdsec_list("crowdsec_blocklists") && is_crowdsec_list("crowdsec6_blocklists") && !is_crowdsec_list("__qfeeds_malware_ip"));
+        assert_eq!(how_blocked(&[(7, "ssh-bf".into())], &["crowdsec_blocklists".into()]), vec!["ban (ssh-bf)", "blocklist crowdsec_blocklists"]);
     }
 }

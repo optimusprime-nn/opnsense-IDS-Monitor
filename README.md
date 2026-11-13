@@ -89,6 +89,9 @@ with alerts, toasts and the red tray icon, and health problems clear themselves 
 firewall bouncer are running and checking in, active bans and recent alerts. Alerts for serious scenarios
 (brute force on the web GUI/SSH, CVE/exploit attempts) become findings; routine ones like port scans are
 only counted. IPS findings from an IP CrowdSec has banned get "CrowdSec has banned this IP" and +20 points.
+IPS Watch also alerts when CrowdSec blocks something you need (your own devices, addresses your devices connect
+to, or the Troubleshoot sites that must work), and the finding has **Unblock in CrowdSec** and **Always allow**
+buttons. Always-allowed addresses (`crowdsec.allow`) are unblocked automatically on every health check.
 
 Findings can be filtered by kind (IPS / Health / Exposure / New devices / Config changes / CrowdSec) and include
 *Resolved*. CLI: `ipswatch-cli health` runs every check once and prints a summary.

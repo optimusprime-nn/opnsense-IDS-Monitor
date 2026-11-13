@@ -44,6 +44,28 @@ checking in, how many IPs are blocked, the top scenarios and recent alerts. Aler
 force on the web GUI or SSH, CVE / exploit attempts) become findings; routine ones like port scans are only counted.
 IPS findings from an IP CrowdSec has banned get "CrowdSec has banned this IP" and +20 points.
 
+### When CrowdSec blocks something you need
+
+CrowdSec's community blocklist holds tens of thousands of addresses, and sometimes one you need is on it, or a
+device of yours gets banned. On every health check IPS Watch looks for that and raises a finding when CrowdSec is
+blocking:
+
+- **one of your own devices** (a ban on an internal address): HIGH
+- **a site on the Troubleshoot "sites that must work" list**: HIGH
+- **an address your devices tried to reach** (from the firewall log): MEDIUM
+
+Open the finding to override it:
+
+- **Unblock in CrowdSec...** lifts the ban or blocklist entry now. A blocklist entry can come back with the next
+  blocklist download.
+- **Always allow...** unblocks it now and adds it to the always-allow list (*Settings → Health checks → Always
+  allow*). From then on, IPS Watch lifts any CrowdSec block on that address on every health check and leaves a LOW
+  finding saying it did. Networks (CIDR) work too.
+
+Both show what will change and ask first. Turn the alerts off with *Alert when CrowdSec blocks what you need*.
+The API user needs write access to the CrowdSec decisions and to *Firewall: Alias* for the overrides.
+
+
 ## Devices and config changes
 
 Further down the page: the devices seen on each interface (IP, MAC, vendor, name, first and last seen) and the

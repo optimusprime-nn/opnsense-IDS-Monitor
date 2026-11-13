@@ -153,6 +153,17 @@ See [Troubleshoot](../gui/troubleshoot.html) for what each check means.
 These change the firewall or DNS servers. Each one does a **dry run** by default and changes nothing until you add
 `--yes`.
 
+### crowdsec-unblock
+
+Shows how CrowdSec is blocking an address (a ban or a blocklist) and lifts the block. `--always` also adds it to
+`crowdsec.allow`, so later blocks are lifted automatically.
+
+```powershell
+ipswatch-cli crowdsec-unblock 203.0.113.9                 # dry run: what's blocking it
+ipswatch-cli crowdsec-unblock 203.0.113.9 --yes           # unblock now
+ipswatch-cli crowdsec-unblock 203.0.113.9 --always --yes  # unblock and always allow
+```
+
 ### ips-policy
 
 Create, update or remove the "IPS Watch - drop high-risk" policy, which sets the Alert rules of the high-risk

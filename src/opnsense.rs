@@ -129,6 +129,17 @@ impl OPNsense {
         self.req("GET", path, None, &[])
     }
 
+    /// Raw DELETE (removing a CrowdSec decision).
+    pub fn delete_raw(&self, path: &str) -> Result<Value> {
+        self.req("DELETE", path, None, &[])
+    }
+
+    /// The firewall aliases (blocklists, block alias...) whose tables currently hold `ip`.
+    pub fn aliases_containing(&self, ip: &str) -> Result<Vec<String>> {
+        let v = self.req("POST", "firewall/alias_util/find_references", Some(json!({"ip": ip})), &[])?;
+        Ok(v.get("matches").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default())
+    }
+
     /// Raw POST of a JSON body (searches and, for policy changes, writes).
     pub fn post_raw(&self, path: &str, body: Value) -> Result<Value> {
         self.req("POST", path, Some(body), &[])
