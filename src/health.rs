@@ -653,7 +653,12 @@ pub fn run(cfg: &Config, store: &Store, api: &OPNsense) -> Result<(Snapshot, Vec
     check!("ids rulesets", check_rule_feeds(api, &mut problems));
     if cfg.crowdsec.enabled {
         match crate::crowdsec::check(cfg, store, api, &mut problems) {
-            Ok(st) => snap.crowdsec = st,
+            Ok(st) => {
+                if cfg.crowdsec.watch_blocking && st.as_ref().is_some_and(|s| s.running) {
+                    resolvable.push("crowdsec:blocking:");
+                }
+                snap.crowdsec = st
+            }
             Err(e) => {
                 warn!("health check 'crowdsec' failed: {e:#}");
                 snap.errors.push(format!("crowdsec: {e:#}"));

@@ -74,6 +74,16 @@ enum Cmd {
     },
     /// Run the firewall health, exposure, device and config checks once and print the result
     Health,
+    /// Show whether CrowdSec blocks an IP and lift the block. Without --yes: dry run.
+    CrowdsecUnblock {
+        ip: String,
+        /// Also add it to the always-allow list, so future CrowdSec blocks are lifted automatically
+        #[arg(long)]
+        always: bool,
+        /// Confirm the change
+        #[arg(long)]
+        yes: bool,
+    },
     /// Find out why the internet or a site isn't working: clock, gateways, blocked traffic, IPS,
     /// sites that must work and what changed since the baseline. Read-only unless --fix is given.
     Troubleshoot {
@@ -362,6 +372,20 @@ fn run() -> Result<()> {
                     println!("\nDRY RUN - nothing was changed. Apply with: ipswatch-cli ips-policy --apply --yes");
                 }
             }
+        }
+        Cmd::CrowdsecUnblock { ip, always, yes } => {
+            let a = api()?;
+            println!("{}", ipswatch::crowdsec::unblock_preview(&a, &ip, always));
+            anyhow::ensure!(yes, "\nThis was a dry run. Add --yes to apply it.");
+            if always {
+                let mut c = cfg.clone();
+                if !c.crowdsec.allow.iter().any(|x| x.trim() == ip) {
+                    c.crowdsec.allow.push(ip.clone());
+                    ipswatch::config::save(&c, &cfg_path)?;
+                    println!("\nAdded {ip} to the CrowdSec always-allow list.");
+                }
+            }
+            println!("\n{}", ipswatch::crowdsec::unblock(&a, &ip)?);
         }
         Cmd::Troubleshoot { fix, yes, mark_baseline } => {
             let a = api()?;

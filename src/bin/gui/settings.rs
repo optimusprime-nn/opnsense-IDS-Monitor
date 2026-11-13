@@ -76,6 +76,7 @@ struct Lists {
     policy_rulesets: String,
     ignore_services: String,
     cs_scenarios: String,
+    cs_allow: String,
     dns_domains: String,
     smtp_to: String,
     never_block: String,
@@ -136,6 +137,7 @@ impl SettingsForm {
             policy_rulesets: join(&cfg.ips_policy.rulesets),
             ignore_services: join(&cfg.health.ignore_services),
             cs_scenarios: join(&cfg.crowdsec.finding_scenarios),
+            cs_allow: join(&cfg.crowdsec.allow),
             dns_domains: join(&cfg.dns.test_domains),
         };
         self.error = None;
@@ -210,6 +212,7 @@ impl SettingsForm {
         c.ips_policy.rulesets = split(&l.policy_rulesets, true);
         c.health.ignore_services = split(&l.ignore_services, true);
         c.crowdsec.finding_scenarios = split(&l.cs_scenarios, true);
+        c.crowdsec.allow = split(&l.cs_allow, true);
         c.dns.test_domains = split(&l.dns_domains, true);
         c.firewall.correlate_ignore_ports = nums(&l.fw_ignore_ports, "").unwrap_or(c.firewall.correlate_ignore_ports);
         c
@@ -532,6 +535,12 @@ impl SettingsForm {
             row(ui, "Bouncer check-in alert (minutes)", "Bans aren't enforced while the bouncer is away", |ui| num(ui, &mut cs.bouncer_stale_minutes, 2..=1440));
             row(ui, "Boost IPS findings from banned IPs", "+20 points and a \"CrowdSec has banned this IP\" reason", |ui| {
                 ui.checkbox(&mut cs.boost_ips, "");
+            });
+            row(ui, "Alert when CrowdSec blocks what you need", "Your own devices, addresses your devices connect to, and the Troubleshoot sites that must work", |ui| {
+                ui.checkbox(&mut cs.watch_blocking, "");
+            });
+            row(ui, "Always allow (never blocked by CrowdSec)", "IPs or networks, one per line. IPS Watch lifts any CrowdSec ban or blocklist entry for them on every health check", |ui| {
+                multi(ui, &mut self.lists.cs_allow, 3)
             });
         });
     }

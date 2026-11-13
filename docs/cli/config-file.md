@@ -140,6 +140,8 @@ save from the app. On Linux they're stored as written, so keep the file private 
 | `finding_scenarios` | `["-bf", "bruteforce", "cve-", "exploit", "backdoor"]` | Scenarios that raise findings | |
 | `bouncer_stale_minutes` | `10` | Bouncer check-in alert | |
 | `boost_ips` | `true` | Boost IPS findings from banned IPs | |
+| `watch_blocking` | `true` | Alert when CrowdSec blocks what you need | Your devices, addresses they connect to, sites that must work |
+| `allow` | `[]` | Always allow (never blocked by CrowdSec) | IPs or CIDR networks; any CrowdSec block on them is lifted on every health check |
 
 ## [dns]
 

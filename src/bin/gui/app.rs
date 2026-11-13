@@ -118,6 +118,10 @@ enum Bg {
     Dns(Option<String>),
     PolicyPlan(Result<ipswatch::ipspolicy::Plan, String>),
     Troubleshoot(Result<ipswatch::troubleshoot::Report, String>),
+    /// What lifting a CrowdSec block on `ip` will do (read from the firewall); asks next.
+    CsPreview { ip: String, always: bool, text: String },
+    /// A CrowdSec unblock finished.
+    CsDone(Result<String, String>),
     /// A troubleshoot fix finished; re-run the checks afterwards.
     Fixed(Result<String, String>),
     Reload,
@@ -438,6 +442,50 @@ impl App {
                 Err(e) => self.message("Export failed", format!("{e:#}"), true),
             }
         }
+    }
+
+    /// Start lifting a CrowdSec block: read what's blocking it first (preview), then ask.
+    fn crowdsec_unblock(&mut self, ip: String, always: bool) {
+        let cfg = self.ctl.cfg();
+        if cfg.opnsense.url.is_empty() {
+            self.message("CrowdSec", "Configure the firewall connection in Settings first.", true);
+            return;
+        }
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            self.message("CrowdSec", format!("'{ip}' is not an IP address."), true);
+            return;
+        }
+        self.spawn(move || match OPNsense::new(&cfg.opnsense) {
+            Ok(api) => Bg::CsPreview { text: ipswatch::crowdsec::unblock_preview(&api, &ip, always), ip, always },
+            Err(e) => Bg::CsDone(Err(format!("{e:#}"))),
+        });
+    }
+
+    /// The preview is in: confirm, remember an always-allow, and unblock.
+    fn crowdsec_confirm(&mut self, ip: String, always: bool, text: String) {
+        let yes = rfd::MessageDialog::new()
+            .set_title(if always { "Always allow in CrowdSec" } else { "Unblock in CrowdSec" })
+            .set_description(format!("{text}\n\nGo ahead?"))
+            .set_level(rfd::MessageLevel::Warning)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if yes != rfd::MessageDialogResult::Yes {
+            return;
+        }
+        if always {
+            let mut cfg = self.ctl.cfg();
+            if !cfg.crowdsec.allow.iter().any(|a| a.trim() == ip) {
+                cfg.crowdsec.allow.push(ip.clone());
+                if let Err(e) = config::save(&cfg, &self.ctl.cfg_path) {
+                    self.message("CrowdSec", format!("Could not save the always-allow list: {e:#}"), true);
+                    return;
+                }
+                *self.ctl.shared.cfg.write().unwrap_or_else(|e| e.into_inner()) = cfg.clone();
+                self.settings.load(&cfg);
+            }
+        }
+        let cfg = self.ctl.cfg();
+        self.spawn(move || Bg::CsDone(OPNsense::new(&cfg.opnsense).and_then(|api| ipswatch::crowdsec::unblock(&api, &ip)).map_err(|e| format!("{e:#}"))));
     }
 
     fn block(&mut self, unblock: bool) {
@@ -1213,6 +1261,14 @@ Go ahead?", fix.preview()))
                 if ui.add_enabled(inbound, egui::Button::new("Unblock IP...")).clicked() {
                     self.block(true);
                 }
+                if f.kind == "crowdsec" && f.subject_ip.parse::<std::net::IpAddr>().is_ok() {
+                    if ui.button("Unblock in CrowdSec...").on_hover_text("Lift the ban / blocklist entry now (shows what will change first)").clicked() {
+                        self.crowdsec_unblock(f.subject_ip.clone(), false);
+                    }
+                    if ui.button("Always allow...").on_hover_text("Unblock now and keep it unblocked: IPS Watch lifts any future CrowdSec block on it").clicked() {
+                        self.crowdsec_unblock(f.subject_ip.clone(), true);
+                    }
+                }
                 if ui.button("Show events").clicked() {
                     self.e_search = f.subject_ip.clone();
                     self.events = self.ctl.shared.store.recent_events(2000, &self.e_search).unwrap_or_default();
@@ -1514,6 +1570,14 @@ impl eframe::App for App {
                         self.message = Some(("DNS check".into(), e, true));
                     }
                 }
+                Bg::CsPreview { ip, always, text } => self.crowdsec_confirm(ip, always, text),
+                Bg::CsDone(r) => match r {
+                    Ok(t) => {
+                        self.message = Some(("CrowdSec".into(), t, false));
+                        self.check_health();
+                    }
+                    Err(e) => self.message = Some(("CrowdSec unblock failed".into(), e, true)),
+                },
                 Bg::Troubleshoot(r) => {
                     self.ts_busy = false;
                     match r {
