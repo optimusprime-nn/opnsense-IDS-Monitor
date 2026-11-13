@@ -401,7 +401,7 @@ impl App {
     fn spawn(&self, f: impl FnOnce() -> Bg + Send + 'static) {
         let tx = self.bg_tx.clone();
         let ctx = self.ctl.ctx.clone();
-        std::thread::spawn(move || {
+        ipswatch::spawn_thread("job", move || {
             let _ = tx.send(f());
             ctx.request_repaint();
         });

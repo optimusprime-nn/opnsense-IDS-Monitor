@@ -1,6 +1,6 @@
 [package]
 name = "ipswatch"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Capture OPNsense IPS (Suricata) alerts and flag potential unwanted access"
 license = "MIT"

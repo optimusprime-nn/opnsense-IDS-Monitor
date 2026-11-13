@@ -1,4 +1,4 @@
-# ipswatch configuration (written by IPS Watch 1.1.0)
+# ipswatch configuration (written by IPS Watch 1.2.0)
 db_path = "ipswatch.db"
 poll_seconds = 60
 retention_days = 30
@@ -180,6 +180,8 @@ finding_scenarios = [
 ]
 bouncer_stale_minutes = 10
 boost_ips = true
+watch_blocking = true
+allow = []
 
 [dns]
 enabled = true
