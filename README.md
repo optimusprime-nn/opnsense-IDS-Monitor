@@ -218,7 +218,7 @@ plus the severity/repeat/scan points. These usually matter most: something is al
    Intake is bounded (line length, connections, queued events); anything dropped is logged.
 
 **API user** (*System → Access → Users*): create a dedicated user and give it only the Intrusion Detection
-and firewall-log privileges, plus *Firewall: Alias* if you'll block IPs. Then create an API key for it.
+and firewall-log privileges, plus *Diagnostics: PF Table IP addresses* if you'll block IPs. Then create an API key for it.
 
 **HTTPS certificate: do I need a "CA certificate file"?** Not sure? Click **Check certificate** next to the field
 (or run `ipswatch-cli check-cert`). It connects to the firewall and tells you which case you're in:

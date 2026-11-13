@@ -63,7 +63,7 @@ Open the finding to override it:
   finding saying it did. Networks (CIDR) work too.
 
 Both show what will change and ask first. Turn the alerts off with *Alert when CrowdSec blocks what you need*.
-The API user needs write access to the CrowdSec decisions and to *Firewall: Alias* for the overrides.
+The API user needs the *CrowdSec* privilege and *Diagnostics: PF Table IP addresses* (which edits the blocklist tables) for the overrides.
 
 
 ## Devices and config changes
