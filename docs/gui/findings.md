@@ -46,6 +46,18 @@ Select a finding to see, on the right:
 | Copy IP | Copy the source address. |
 | Look up on AbuseIPDB | Open the address on abuseipdb.com in your browser. |
 
+### Several at once
+
+Select several findings, then acknowledge, mark false positive or reopen them together:
+
+- **Ctrl+click** adds or removes a finding; **Shift+click** selects everything between it and the current one.
+- **Select all N shown** (above the list) selects every finding your filters show. Filter first (for example
+  *Min severity* or a search for an IP), then select all.
+
+The bar above the list and the right-hand panel then show how many are selected, with **Acknowledge**,
+**False positive**, **Reopen** and **Clear selection**. Right-clicking a selected row offers the same.
+A plain click goes back to a single finding.
+
 Health, DNS and exposure findings **resolve themselves** when the problem is fixed; you'll see them under
 *Show: Resolved*. Acknowledging an intended exposure (for example a port forward to your web server) sticks.
 
