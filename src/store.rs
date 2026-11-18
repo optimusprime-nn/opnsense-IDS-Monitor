@@ -425,6 +425,21 @@ impl Store {
         Ok(())
     }
 
+    /// Set the status of several findings in one transaction. Returns how many changed.
+    pub fn set_status_many(&self, keys: &[String], status: &str) -> Result<usize> {
+        let mut db = self.conn();
+        let tx = db.transaction()?;
+        let mut n = 0;
+        {
+            let mut st = tx.prepare("UPDATE findings SET status = ?1 WHERE key = ?2 AND status <> ?1")?;
+            for k in keys {
+                n += st.execute(params![status, k])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn set_notified(&self, key: &str, at: &str, sev: Severity) -> Result<()> {
         self.conn().execute(
             "UPDATE findings SET notified_at = ?1, notified_severity = ?2 WHERE key = ?3",

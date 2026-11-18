@@ -150,6 +150,8 @@ pub struct App {
     f_search: String,
     findings: Vec<Finding>,
     selected: Option<String>,
+    /// Findings picked with Ctrl/Shift+click (multi-select); `selected` stays the one shown.
+    marked: std::collections::BTreeSet<String>,
     counts: [usize; 4],
     events_24h: i64,
     // events
@@ -283,6 +285,7 @@ impl App {
             f_search: String::new(),
             findings: vec![],
             selected: None,
+            marked: Default::default(),
             counts: [0; 4],
             events_24h: 0,
             e_search: String::new(),
@@ -362,6 +365,8 @@ impl App {
         if self.selected.is_none() {
             self.selected = self.findings.first().map(|f| f.key.clone());
         }
+        let shown: std::collections::HashSet<&str> = self.findings.iter().map(|f| f.key.as_str()).collect();
+        self.marked.retain(|k| shown.contains(k.as_str()));
         let open = store.list_findings(Some("open"), Severity::Low, 100_000).unwrap_or_default();
         self.counts = [0; 4];
         for f in &open {
@@ -391,6 +396,56 @@ impl App {
             let _ = self.ctl.shared.store.set_status(&k, status);
             self.reload();
             self.selected = Some(k);
+        }
+    }
+
+    /// Apply a status to every multi-selected finding.
+    fn set_status_marked(&mut self, status: &str) {
+        let keys: Vec<String> = self.marked.iter().cloned().collect();
+        match self.ctl.shared.store.set_status_many(&keys, status) {
+            Ok(n) => log::info!("Set {n} of {} selected findings to {status}", keys.len()),
+            Err(e) => self.message("Could not update the findings", format!("{e:#}"), true),
+        }
+        let keep = self.selected.clone();
+        self.reload();
+        self.selected = keep;
+    }
+
+    /// Plain click selects one; Ctrl+click adds/removes; Shift+click selects the range.
+    fn click_finding(&mut self, key: String, mods: egui::Modifiers) {
+        if mods.shift {
+            let anchor = self.selected.clone().unwrap_or_else(|| key.clone());
+            let pos = |k: &str| self.findings.iter().position(|f| f.key == k);
+            if let (Some(a), Some(b)) = (pos(&anchor), pos(&key)) {
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                if !mods.command {
+                    self.marked.clear();
+                }
+                for f in &self.findings[lo..=hi] {
+                    self.marked.insert(f.key.clone());
+                }
+            }
+            // Keep the anchor as the shown finding so further Shift+clicks extend from it.
+            if self.selected.is_none() {
+                self.selected = Some(key);
+            }
+        } else if mods.command {
+            if self.marked.is_empty() {
+                if let Some(s) = self.selected.clone() {
+                    self.marked.insert(s);
+                }
+            }
+            if !self.marked.remove(&key) {
+                self.marked.insert(key.clone());
+            }
+            self.selected = Some(key);
+        } else {
+            self.marked.clear();
+            self.selected = Some(key);
+        }
+        if self.marked.len() == 1 {
+            self.selected = self.marked.iter().next().cloned();
+            self.marked.clear();
         }
     }
 
@@ -1146,9 +1201,38 @@ Go ahead?", fix.preview()))
         if changed {
             self.reload();
         }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.findings.len() > 1, egui::Button::new(format!("Select all {} shown", self.findings.len())).small())
+                .on_hover_text("Selects every finding the filters show, so you can acknowledge them together. Ctrl+click and Shift+click pick several too.")
+                .clicked()
+            {
+                self.marked = self.findings.iter().map(|f| f.key.clone()).collect();
+            }
+            if !self.marked.is_empty() {
+                ui.label(RichText::new(format!("{} selected", self.marked.len())).strong());
+                if ui.small_button("Acknowledge").clicked() {
+                    self.set_status_marked("ack");
+                }
+                if ui.small_button("False positive").clicked() {
+                    self.set_status_marked("false_positive");
+                }
+                if ui.small_button("Reopen").clicked() {
+                    self.set_status_marked("open");
+                }
+                if ui.small_button("Clear selection").clicked() {
+                    self.marked.clear();
+                }
+            } else {
+                ui.weak("Tip: Ctrl+click or Shift+click to select several findings.");
+            }
+        });
         ui.add_space(2.0);
 
+        let mods = ui.input(|i| i.modifiers);
         let sel = self.selected.clone();
+        let marked = self.marked.clone();
+        let mut bulk: Option<&'static str> = None;
         let mut clicked: Option<String> = None;
         let mut double: Option<String> = None;
         let row_h = 24.0;
@@ -1176,7 +1260,7 @@ Go ahead?", fix.preview()))
                     let f = &self.findings[row.index()];
                     let open = f.status == "open";
                     let muted = |t: String| if open { RichText::new(t) } else { RichText::new(t).weak() };
-                    row.set_selected(sel.as_deref() == Some(f.key.as_str()));
+                    row.set_selected(if marked.is_empty() { sel.as_deref() == Some(f.key.as_str()) } else { marked.contains(&f.key) });
                     row.col(|ui| {
                         ui.label(RichText::new(f.severity.as_str().to_uppercase()).strong().color(sev_color(f.severity, dark)));
                     });
@@ -1204,6 +1288,15 @@ Go ahead?", fix.preview()))
                         clicked = Some(f.key.clone());
                     }
                     r.context_menu(|ui| {
+                        if marked.len() > 1 && marked.contains(&f.key) {
+                            for (label, st) in [("Acknowledge", "ack"), ("False positive", "false_positive"), ("Reopen", "open")] {
+                                if ui.button(format!("{label} {} selected", marked.len())).clicked() {
+                                    bulk = Some(st);
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                        }
                         if ui.button("Copy details").clicked() {
                             ui.ctx().copy_text(finding_text(f));
                             ui.close_menu();
@@ -1219,7 +1312,10 @@ Go ahead?", fix.preview()))
                 });
             });
         if let Some(k) = clicked {
-            self.selected = Some(k);
+            self.click_finding(k, mods);
+        }
+        if let Some(st) = bulk {
+            self.set_status_marked(st);
         }
         if let Some(ip) = double {
             self.e_search = ip;
@@ -1232,9 +1328,52 @@ Go ahead?", fix.preview()))
         }
     }
 
+    /// Detail panel when several findings are selected: what they are, and bulk actions.
+    fn multi_panel(&mut self, ui: &mut egui::Ui, dark: bool) {
+        let picked: Vec<Finding> = self.findings.iter().filter(|f| self.marked.contains(&f.key)).cloned().collect();
+        ui.add_space(6.0);
+        ui.heading(format!("{} findings selected", picked.len()));
+        let open = picked.iter().filter(|f| f.status == "open").count();
+        ui.weak(format!("{open} open, {} acknowledged or false positive", picked.len() - open));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.add_enabled(open > 0, egui::Button::new(format!("Acknowledge {}", picked.len()))).clicked() {
+                self.set_status_marked("ack");
+            }
+            if ui.button("False positive").clicked() {
+                self.set_status_marked("false_positive");
+            }
+            if ui.add_enabled(open < picked.len(), egui::Button::new("Reopen")).clicked() {
+                self.set_status_marked("open");
+            }
+            if ui.button("Clear selection").clicked() {
+                self.marked.clear();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Copy details").clicked() {
+                ui.ctx().copy_text(picked.iter().map(finding_text).collect::<Vec<_>>().join("\n\n"));
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for f in &picked {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(f.severity.as_str().to_uppercase()).strong().color(sev_color(f.severity, dark)));
+                    let t = RichText::new(&f.title);
+                    ui.label(if f.status == "open" { t } else { t.weak() });
+                });
+            }
+        });
+    }
+
     fn detail_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("detail").resizable(true).default_width(430.0).min_width(320.0).show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
+            if self.marked.len() > 1 {
+                self.multi_panel(ui, dark);
+                return;
+            }
             let Some(f) = self.selected_finding().cloned() else {
                 ui.add_space(20.0);
                 ui.weak("Select a finding to see why it was flagged.");

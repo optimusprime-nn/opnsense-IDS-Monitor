@@ -415,3 +415,22 @@ fn not_dropping_warning_ignores_alerts_before_the_drop_policy() {
     store.delete_kv(ipswatch::ipspolicy::APPLIED_KV).unwrap();
     assert_eq!(store.undropped_alerts(now).unwrap(), Some(25));
 }
+
+#[test]
+fn several_findings_change_status_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("m.db")).unwrap();
+    let keys: Vec<String> = ["multi:a", "multi:b", "multi:c"].iter().map(|s| s.to_string()).collect();
+    for k in &keys {
+        store.upsert_finding(&health_finding(k, "health")).unwrap();
+    }
+    // Two picked: only those change, and a repeat changes nothing.
+    assert_eq!(store.set_status_many(&keys[..2], "ack").unwrap(), 2);
+    assert_eq!(store.set_status_many(&keys[..2], "ack").unwrap(), 0);
+    let status = |k: &str| store.list_findings(None, Severity::Low, 100).unwrap().into_iter().find(|f| f.key == k).unwrap().status;
+    assert_eq!(status("multi:a"), "ack");
+    assert_eq!(status("multi:b"), "ack");
+    assert_eq!(status("multi:c"), "open");
+    assert_eq!(store.set_status_many(&keys, "open").unwrap(), 2);
+    assert_eq!(status("multi:a"), "open");
+}
