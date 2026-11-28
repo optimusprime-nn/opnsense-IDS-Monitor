@@ -1124,7 +1124,7 @@ pub fn test(cfg: &Config) -> (String, bool) {
             Technitium::new(srv, cfg.dns.timeout_seconds, cfg.dns.allow_http).and_then(|a| a.get("settings/get", &[]))
         };
         match api {
-            Ok(v) => lines.push(format!("  API: OK - Technitium {} ({})", s(&v, "version"), s(&v, "dnsServerDomain"))),
+            Ok(v) => lines.push(format!("  API: OK - {} {} ({})", engine_of(&v), s(&v, "version"), s(&v, "dnsServerDomain"))),
             Err(e) => {
                 err = true;
                 lines.push(format!("  API: FAILED - {e:#}"));
