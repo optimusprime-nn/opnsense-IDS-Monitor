@@ -2063,6 +2063,10 @@ Checking again..."), false));
                 .show(ctx, |ui| {
                     ui.label(format!("IPS Watch {}", ipswatch::VERSION));
                     ui.label("Captures OPNsense Suricata IPS alerts and flags potential unwanted access.");
+                    ui.horizontal(|ui| {
+                        ui.label("Free software under the GNU GPL, version 3 or later.");
+                        ui.hyperlink_to("Source code", "https://github.com/optimusprime-nn/opnsense-IDS-Monitor");
+                    });
                     ui.weak(format!("Settings: {}", self.ctl.cfg_path.display()));
                     ui.weak(format!("Database: {}", self.db_path));
                 });
