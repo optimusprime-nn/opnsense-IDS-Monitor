@@ -12,7 +12,8 @@ The DNS page watches the resolvers your network uses, every 5 minutes by default
 (*Settings → DNS servers*). Each server is one of two types:
 
 - **Technitium**: read through its own HTTP API with a token (*Administration → Sessions → Create Token*; a
-  read-only user is enough).
+  read-only user is enough). Servers that speak the same API, such as RUSTy-DNS, work too and are shown under their
+  own name.
 - **Unbound (OPNsense)**: the firewall's built-in resolver, read through the firewall API with the same key and
   secret as everything else. No token. Test queries go to the firewall's address unless you enter another one.
 

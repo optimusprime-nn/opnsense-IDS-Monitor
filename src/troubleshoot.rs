@@ -242,7 +242,7 @@ fn show(v: &str) -> &str {
 
 fn s(v: &Value, k: &str) -> String {
     match v.get(k) {
-        Some(Value::String(x)) => x.clone(),
+        Some(Value::String(x)) => crate::clean_text(x),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::Bool(b)) => b.to_string(),
         _ => String::new(),

@@ -103,6 +103,9 @@ pub struct ServerStatus {
     pub name: String,
     /// "technitium" or "unbound".
     pub backend: String,
+    /// Which server answers the Technitium API, by its own name ("RUSTy-DNS" speaks the same
+    /// API); "Technitium" when it gives none. Empty for Unbound, or before the server was read.
+    pub engine: String,
     pub url: String,
     pub host: String,
     pub server_domain: String,
@@ -142,8 +145,33 @@ pub struct ServerStatus {
 }
 
 impl ServerStatus {
-    pub fn product(&self) -> &'static str {
-        if self.backend == "unbound" { "Unbound" } else { "Technitium" }
+    pub fn product(&self) -> String {
+        if self.backend == "unbound" {
+            "Unbound".to_string()
+        } else if self.engine.is_empty() {
+            "Technitium".to_string()
+        } else {
+            self.engine.clone()
+        }
+    }
+}
+
+/// Which server gave these settings, by its own name. A server that answers the Technitium API
+/// but is not Technitium says so in `product` (RUSTy-DNS does, from its 2026-11-27 build).
+/// Before that, RUSTy-DNS was told apart by the one setting only it has (ACME for its DNS-over-TLS
+/// certificate). No name at all: Technitium, which never sends one.
+pub fn engine_of(settings: &Value) -> String {
+    if let Some(name) = settings.get("product").and_then(Value::as_str) {
+        let name = name.trim();
+        // Shown as text: a short plain name only.
+        if !name.is_empty() && name.chars().count() <= 40 && !name.chars().any(char::is_control) {
+            return name.to_string();
+        }
+    }
+    if settings.get("dnsTlsCertificateManagedByAcme").is_some() {
+        "RUSTy-DNS".to_string()
+    } else {
+        "Technitium".to_string()
     }
 }
 
@@ -239,7 +267,7 @@ impl Technitium {
 
 fn s(v: &Value, k: &str) -> String {
     match v.get(k) {
-        Some(Value::String(x)) => x.clone(),
+        Some(Value::String(x)) => crate::clean_text(x),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::Bool(b)) => b.to_string(),
         _ => String::new(),
@@ -410,7 +438,7 @@ pub fn sanitize(v: &Value) -> Value {
 fn short(v: Option<&Value>) -> String {
     let t = match v {
         None | Some(Value::Null) => "(none)".to_string(),
-        Some(Value::String(x)) => x.clone(),
+        Some(Value::String(x)) => crate::clean_text(x),
         Some(x) => x.to_string(),
     };
     if t.chars().count() > 90 { format!("{}...", t.chars().take(87).collect::<String>()) } else { t }
@@ -608,6 +636,7 @@ fn check_technitium(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &
         }
     };
     st.api_ok = true;
+    st.engine = engine_of(&set);
     st.version = s(&set, "version");
     st.up_since = s(&set, "uptimestamp");
     st.server_domain = s(&set, "dnsServerDomain");
@@ -690,14 +719,14 @@ fn check_technitium(cfg: &Config, store: &Store, srv: &DnsServerCfg, exposure: &
                 key: format!("dns:health:{host}:update"),
                 kind: "dns",
                 severity: Severity::Low,
-                title: format!("DNS {label}: Technitium {} is available", st.update),
+                title: format!("DNS {label}: {} {} is available", st.product(), st.update),
                 reasons: vec![format!("running {}", st.version), format!("update from the console: {}", srv.url)],
                 targets: vec![host.clone()],
             });
         }
     }
 
-    let ctx = ExposureCtx { purposes: port_purposes(&set), open_resolver: recursion_open(&set), product: "Technitium" };
+    let ctx = ExposureCtx { purposes: port_purposes(&set), open_resolver: recursion_open(&set), product: engine_of(&set) };
     check_exposure(&ctx, &host, &label, exposure, timeout, st, out);
 }
 
@@ -973,11 +1002,11 @@ fn zone_changes(cfg: &Config, store: &Store, api: &Technitium, st: &mut ServerSt
 struct ExposureCtx {
     purposes: BTreeMap<u16, Purpose>,
     open_resolver: bool,
-    product: &'static str,
+    product: String,
 }
 
 fn check_exposure(ctx: &ExposureCtx, host: &str, label: &str, exposure: &[Exposed], timeout: Duration, st: &mut ServerStatus, out: &mut Vec<Problem>) {
-    let (purposes, open_resolver, product) = (&ctx.purposes, ctx.open_resolver, ctx.product);
+    let (purposes, open_resolver, product) = (&ctx.purposes, ctx.open_resolver, ctx.product.as_str());
     for e in exposure.iter().filter(|e| e.target == host && e.source == "port forward") {
         let port = first_port(&e.port);
         let pp = port.and_then(|p| purposes.get(&p).cloned()).unwrap_or_default();
@@ -1225,6 +1254,24 @@ pub fn run(cfg: &Config, store: &Store, exposure: &[Exposed], ids_restarts: &[St
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_server_that_speaks_the_technitium_api_is_named_for_what_it_is() {
+        assert_eq!(engine_of(&json!({"version": "15.6.2.15", "recursion": "UseSpecifiedNetworkACL"})), "Technitium");
+        assert_eq!(engine_of(&json!({"version": "1.1.1", "dnsTlsCertificateManagedByAcme": false})), "RUSTy-DNS");
+        // The server's own name comes first, whatever else it sends.
+        assert_eq!(engine_of(&json!({"version": "1.1.1", "product": "RUSTy-DNS", "dnsTlsCertificateManagedByAcme": false})), "RUSTy-DNS");
+        assert_eq!(engine_of(&json!({"version": "2.0.0", "product": " RUSTyDNS "})), "RUSTyDNS");
+        // A name that is not plain text is not shown.
+        assert_eq!(engine_of(&json!({"version": "15.6", "product": "bad\nname"})), "Technitium");
+        assert_eq!(engine_of(&json!({"version": "15.6", "product": "x".repeat(41)})), "Technitium");
+        let mut st = ServerStatus { backend: "technitium".into(), ..Default::default() };
+        assert_eq!(st.product(), "Technitium");
+        st.engine = "RUSTy-DNS".into();
+        assert_eq!(st.product(), "RUSTy-DNS");
+        st.backend = "unbound".into();
+        assert_eq!(st.product(), "Unbound");
+    }
 
     #[test]
     fn qname_encoding() {

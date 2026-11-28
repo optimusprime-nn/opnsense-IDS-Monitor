@@ -52,7 +52,8 @@ and email alerts are configured separately under
 | Option | Effect |
 |---|---|
 | `--minimized` | Start hidden in the tray (used by *Start with Windows*) |
-| `--config <file>` | Use another settings file (the database path inside it is relative to that file) |
+| `--config <file>` | Use another settings file (the database path inside it is relative to that file). A copy with its own settings file runs beside the normal one. |
+| `--host <ip>` | Open the host page for an address |
 | `--tab <page>[:section]` | Open on a given page: `findings`, `health`, `dns`, `events`, `log` or `settings`. For settings, add a section: `firewall`, `collection`, `detection`, `rules`, `notifications`, `autoblock`, `health`, `dns`, `application` or `data`, e.g. `--tab settings:application` |
 
 Only one copy runs at a time; starting it again brings the running window to the front.

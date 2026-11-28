@@ -68,7 +68,7 @@ fn flag(v: &Value, k: &str) -> bool {
 
 fn text(v: &Value, k: &str) -> String {
     match v.get(k) {
-        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::String(s)) => crate::clean_text(s.trim()),
         Some(Value::Number(x)) => x.to_string(),
         _ => String::new(),
     }
@@ -410,7 +410,7 @@ fn check_with(cfg: &Config, store: &Store, api: &OPNsense, exposure: &[Exposed],
     let ctx = ExposureCtx {
         purposes: BTreeMap::from([(set.port, Purpose { name: "DNS".into(), udp_only: false })]),
         open_resolver: set.open_resolver,
-        product: "Unbound",
+        product: "Unbound".to_string(),
     };
     let timeout = std::time::Duration::from_secs(cfg.dns.timeout_seconds.clamp(2, 5));
     check_exposure(&ctx, &host, &label, exposure, timeout, st, out);

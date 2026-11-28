@@ -124,6 +124,8 @@ enum Bg {
     CsDone(Result<String, String>),
     /// A troubleshoot fix finished; re-run the checks afterwards.
     Fixed(Result<String, String>),
+    /// "Who owns it?" for the host window's address.
+    Owner { ip: String, result: Result<crate::host_view::Owner, String> },
     Reload,
 }
 
@@ -187,6 +189,11 @@ pub struct App {
     ts_busy: bool,
     /// Editable "sites that must work" list (one per line).
     ts_sites: String,
+    /// The host page, when open.
+    host: Option<crate::host_view::HostWin>,
+    /// `--screenshot <file.png>`: save the window there once it has settled, then quit
+    /// (used to make the documentation's pictures). The time it was asked for, once asked.
+    shot: Option<(std::path::PathBuf, Instant, Option<Instant>)>,
 }
 
 /// Remember when the Drop policy was applied (or forget it when removed), so the
@@ -314,6 +321,8 @@ impl App {
             ts_busy: false,
             ts_sites: cfg.troubleshoot.sites.join("
 "),
+            host: None,
+            shot: None,
             ctl,
         };
         if first_run && app.message.is_none() {
@@ -345,7 +354,45 @@ impl App {
             app.ctl.start();
         }
         app.reload();
+        let arg = |name: &str| std::env::args().skip_while(|a| a != name).nth(1);
+        // --select-first N: select the first N findings shown (several at once).
+        if let Some(n) = arg("--select-first").and_then(|n| n.parse::<usize>().ok()) {
+            app.marked = app.findings.iter().take(n).map(|f| f.key.clone()).collect();
+            if app.marked.len() < 2 {
+                app.marked.clear();
+            }
+        }
+        // --host <ip>: open the host page for that address.
+        if let Some(ip) = arg("--host") {
+            app.open_host(&ip);
+        }
+        if let Some(p) = arg("--screenshot") {
+            app.shot = Some((std::path::PathBuf::from(p), Instant::now(), None));
+        }
         app
+    }
+
+    /// `--screenshot`: ask for a picture of the window once it has settled; save it and quit.
+    fn screenshot_step(&mut self, ctx: &egui::Context) {
+        let Some((path, started, asked)) = self.shot.clone() else { return };
+        if asked.is_none() && started.elapsed() > Duration::from_secs(3) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            self.shot = Some((path.clone(), started, Some(Instant::now())));
+        }
+        let image = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            match save_png(&path, &image) {
+                Ok(()) => log::info!("Screenshot saved to {}", path.display()),
+                Err(e) => log::error!("Screenshot to {} failed: {e:#}", path.display()),
+            }
+            self.ctl.quit();
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 
     // ---- data -----------------------------------------------------------
@@ -446,6 +493,58 @@ impl App {
         if self.marked.len() == 1 {
             self.selected = self.marked.iter().next().cloned();
             self.marked.clear();
+        }
+    }
+
+    /// Open (or refresh) the host page for `ip`.
+    fn open_host(&mut self, ip: &str) {
+        let ip = ip.trim();
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            return;
+        }
+        let cfg = self.ctl.cfg();
+        let health = self.ctl.shared.health.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let dns = self.ctl.shared.dns.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let report = ipswatch::host::build(&self.ctl.shared.store, &cfg, health.as_ref(), dns.as_ref(), ip);
+        // Keep an owner answer already fetched for the same address.
+        let owner = self.host.take().filter(|h| h.report.ip == report.ip).and_then(|h| h.owner);
+        self.host = Some(crate::host_view::HostWin { report, owner });
+    }
+
+    fn look_up_owner(&mut self, ip: String) {
+        let Ok(addr) = ip.parse::<std::net::IpAddr>() else { return };
+        if let Some(h) = &mut self.host {
+            h.owner = Some(None);
+        }
+        self.spawn(move || {
+            let timeout = Duration::from_secs(ipswatch::rdap::TIMEOUT_SECS);
+            let result = ipswatch::rdap::lookup(ipswatch::rdap::DEFAULT_BASE, addr, timeout)
+                .map(|o| crate::host_view::Owner { lines: o.lines(), reverse: ipswatch::rdap::reverse_name(addr) });
+            Bg::Owner { ip, result }
+        });
+    }
+
+    fn host_window(&mut self, ctx: &egui::Context) {
+        let Some(win) = &self.host else { return };
+        match crate::host_view::show(ctx, win) {
+            crate::host_view::Action::None => {}
+            crate::host_view::Action::Close => self.host = None,
+            crate::host_view::Action::OpenFinding(k) => {
+                self.f_status = StatusFilter::All;
+                self.f_kind = KindFilter::All;
+                self.f_search.clear();
+                self.marked.clear();
+                self.selected = Some(k);
+                self.tab = Tab::Findings;
+                self.reload();
+            }
+            crate::host_view::Action::ShowEvents(ip) => {
+                self.e_search = ip;
+                self.events = self.ctl.shared.store.recent_events(2000, &self.e_search).unwrap_or_default();
+                self.tab = Tab::Events;
+            }
+            crate::host_view::Action::LookUpOwner(ip) => self.look_up_owner(ip),
+            crate::host_view::Action::Refresh(ip) => self.open_host(&ip),
         }
     }
 
@@ -1233,6 +1332,7 @@ Go ahead?", fix.preview()))
         let sel = self.selected.clone();
         let marked = self.marked.clone();
         let mut bulk: Option<&'static str> = None;
+        let mut host: Option<String> = None;
         let mut clicked: Option<String> = None;
         let mut double: Option<String> = None;
         let row_h = 24.0;
@@ -1305,6 +1405,10 @@ Go ahead?", fix.preview()))
                             ui.ctx().copy_text(f.subject_ip.clone());
                             ui.close_menu();
                         }
+                        if f.subject_ip.parse::<std::net::IpAddr>().is_ok() && ui.button(format!("Host page for {}", f.subject_ip)).clicked() {
+                            host = Some(f.subject_ip.clone());
+                            ui.close_menu();
+                        }
                     });
                     if r.double_clicked() {
                         double = Some(f.subject_ip.clone());
@@ -1316,6 +1420,9 @@ Go ahead?", fix.preview()))
         }
         if let Some(st) = bulk {
             self.set_status_marked(st);
+        }
+        if let Some(ip) = host {
+            self.open_host(&ip);
         }
         if let Some(ip) = double {
             self.e_search = ip;
@@ -1407,6 +1514,9 @@ Go ahead?", fix.preview()))
                     if ui.button("Always allow...").on_hover_text("Unblock now and keep it unblocked: IPS Watch lifts any future CrowdSec block on it").clicked() {
                         self.crowdsec_unblock(f.subject_ip.clone(), true);
                     }
+                }
+                if f.subject_ip.parse::<std::net::IpAddr>().is_ok() && ui.button("Host page").on_hover_text("Everything IPS Watch knows about this address").clicked() {
+                    self.open_host(&f.subject_ip.clone());
                 }
                 if ui.button("Show events").clicked() {
                     self.e_search = f.subject_ip.clone();
@@ -1500,6 +1610,7 @@ Go ahead?", fix.preview()))
         let red = sev_color(Severity::Critical, dark);
         let detect_cfg = self.ctl.cfg().detect;
         let mut ignore: Option<(i64, String)> = None;
+        let mut host: Option<String> = None;
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -1597,11 +1708,23 @@ Go ahead?", fix.preview()))
                             let _ = open::that(format!("https://www.abuseipdb.com/check/{}", e.src_ip));
                             ui.close_menu();
                         }
+                        ui.separator();
+                        if ui.button(format!("Host page for {}", e.src_ip)).clicked() {
+                            host = Some(e.src_ip.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button(format!("Host page for {}", e.dest_ip)).clicked() {
+                            host = Some(e.dest_ip.clone());
+                            ui.close_menu();
+                        }
                     });
                 });
             });
         if let Some((sid, name)) = ignore {
             self.ignore_sid(sid, &name);
+        }
+        if let Some(ip) = host {
+            self.open_host(&ip);
         }
     }
 
@@ -1645,8 +1768,20 @@ fn card(ui: &mut Ui, big: &str, small: &str, color: Color32) {
     });
 }
 
+fn save_png(path: &std::path::Path, image: &egui::ColorImage) -> anyhow::Result<()> {
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut enc = png::Encoder::new(file, image.size[0] as u32, image.size[1] as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Best);
+    let mut w = enc.write_header()?;
+    w.write_image_data(image.as_raw())?;
+    Ok(())
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.screenshot_step(ctx);
         // Close button -> hide to tray (unless disabled or no tray).
         if ctx.input(|i| i.viewport().close_requested()) {
             let cfg = self.ctl.cfg();
@@ -1751,6 +1886,11 @@ Checking again..."), false));
                     self.message = Some((title.into(), text, error));
                     self.suggest_url = suggest_url;
                 }
+                Bg::Owner { ip, result } => {
+                    if let Some(h) = self.host.as_mut().filter(|h| h.report.ip == ip) {
+                        h.owner = Some(Some(result));
+                    }
+                }
                 Bg::Reload => {}
             }
             self.reload();
@@ -1810,6 +1950,7 @@ Checking again..."), false));
                         self.tab = Tab::Findings;
                         self.reload();
                     }
+                    crate::health_view::Action::OpenHost(ip) => self.open_host(&ip),
                     crate::health_view::Action::None => {}
                 }
             }
@@ -1860,6 +2001,7 @@ Checking again..."), false));
                         self.tab = Tab::Findings;
                         self.reload();
                     }
+                    crate::health_view::Action::OpenHost(ip) => self.open_host(&ip),
                     crate::health_view::Action::None => {}
                 }
             }
@@ -1911,6 +2053,7 @@ Checking again..."), false));
             }
         }
         self.policy_window(ctx);
+        self.host_window(ctx);
         if self.about {
             egui::Window::new("About IPS Watch")
                 .collapsible(false)

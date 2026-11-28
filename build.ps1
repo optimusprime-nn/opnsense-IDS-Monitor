@@ -6,9 +6,10 @@
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot
 
-# Keep local folder names (project path, user profile) out of the executables.
+# Keep local folder names (project path, user profile) out of the executables, and build with
+# Control Flow Guard (an exploit can't jump into the middle of a function).
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
-$env:RUSTFLAGS = "--remap-path-prefix=$PSScriptRoot=ipswatch --remap-path-prefix=$cargoHome=cargo --remap-path-prefix=$env:USERPROFILE=~"
+$env:RUSTFLAGS = "--remap-path-prefix=$PSScriptRoot=ipswatch --remap-path-prefix=$cargoHome=cargo --remap-path-prefix=$env:USERPROFILE=~ -C control-flow-guard=yes"
 
 cargo test --release --locked
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }
@@ -28,5 +29,12 @@ if ($iscc) {
     if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
 } else {
     "Inno Setup 6 not found - skipping the installer (winget install JRSoftware.InnoSetup)"
+}
+# SHA-256 beside each file of this version, so a download can be checked against the release.
+$version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+Get-ChildItem dist\IPSWatch.exe, dist\ipswatch-cli.exe, "dist\IPSWatch-Setup-$version.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+    $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+    "$h  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
+    if ($env:GITHUB_STEP_SUMMARY) { "SHA-256 of $($_.Name): ``$h``" >> $env:GITHUB_STEP_SUMMARY }
 }
 Get-ChildItem dist\*.exe | ForEach-Object { "{0,-18} {1,6:N1} MB" -f $_.Name, ($_.Length / 1MB) }

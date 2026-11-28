@@ -64,7 +64,7 @@ fn as_i64(v: Option<&Value>) -> Option<i64> {
 
 fn as_str(v: Option<&Value>) -> String {
     match v {
-        Some(Value::String(s)) => s.clone(),
+        Some(Value::String(s)) => crate::clean_text(s),
         Some(Value::Number(n)) => n.to_string(),
         _ => String::new(),
     }
@@ -86,7 +86,7 @@ pub fn normalize(rec: &Value) -> Option<Event> {
         ),
         other => (
             match other {
-                Some(Value::String(s)) => s.clone(),
+                Some(Value::String(s)) => crate::clean_text(s),
                 _ => as_str(obj.get("alert_signature")),
             },
             as_i64(obj.get("alert_sid")),

@@ -10,7 +10,9 @@ alerts from OPNsense, stores them in SQLite, correlates them with the firewall l
 - **Settings editor**: every option is editable in the app (Settings tab or the **Settings** menu), with
   validation, Revert, per-section Restore defaults, and test buttons.
 - **Alerts**: Windows toast notifications, and optionally Slack/Discord/webhook, ntfy and email.
-- **Response**: acknowledge / false positive, block or unblock an IP through a firewall alias, and optional auto-block.
+- **Response**: acknowledge / false positive (several at once), block or unblock an IP through a firewall alias, and optional auto-block.
+- **Host page**: everything known about one address in one window (findings, IPS events, device, DNS, CrowdSec,
+  port forwards), with an optional **Who owns it?** registry lookup for internet addresses.
 - **Dark mode**: dark by default, with Light and Follow Windows options (View → Theme, the Settings menu, or Settings → Application). The title bar changes too, and exported HTML reports follow the viewer's dark/light preference.
 - **Secrets**: the API key and secret, SMTP password, DNS tokens and webhook/ntfy URLs are encrypted with Windows DPAPI.
   Firewall and DNS connections must use HTTPS unless you explicitly allow plain HTTP in Settings.
@@ -280,7 +282,10 @@ cargo test --test windows_integration -- --ignored       # toggles the real Run 
 cargo run --bin IPSWatch -- --config samples\demo\config.toml --tab settings:application
 ```
 
-The `--tab findings|events|log|settings[:section]` option opens a specific page. `--minimized` starts in the tray.
+The `--tab findings|events|log|settings[:section]` option opens a specific page, `--host <ip>` opens the host page
+for an address, and `--minimized` starts in the tray. A copy started with its own `--config` runs beside the normal
+one. `scripts\screenshots.ps1` regenerates the documentation's screenshots from the demo data (`--screenshot <png>`
+saves the window and quits).
 
 History: the first commit is the original Python/Tkinter version. The SQLite schema, the settings file
 (including DPAPI-encrypted secrets) and the scoring are compatible with it.

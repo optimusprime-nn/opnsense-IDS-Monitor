@@ -20,3 +20,5 @@ config.toml
 
 # Local reviews of your own firewall (not for the repo)
 /reviews/
+# Made by `cargo run --example make_demo`
+samples/demo/demo-log.txt

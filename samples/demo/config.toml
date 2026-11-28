@@ -1,5 +1,21 @@
+# Demo settings for the documentation's screenshots (made-up addresses; no secrets).
 db_path = "demo.db"
+
 [opnsense]
 url = "https://192.0.2.1"
+
 [gui]
 autostart_monitor = false
+start_with_windows = false
+
+[[dns.servers]]
+name = "ns1"
+kind = "technitium"
+url = "https://192.168.1.99:53443"
+token = ""
+
+[[dns.servers]]
+name = "ns2"
+kind = "technitium"
+url = "https://192.168.1.98:53443"
+token = ""

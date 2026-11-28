@@ -474,6 +474,26 @@ impl Store {
         Ok(rows)
     }
 
+    /// IPS events where `ip` is exactly the source or the destination, newest first.
+    pub fn events_for_ip(&self, ip: &str, limit: usize) -> Result<Vec<Event>> {
+        let db = self.conn();
+        let mut st = db.prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE src_ip = ?1 OR dest_ip = ?1 ORDER BY ts DESC LIMIT {limit}"))?;
+        let rows = st.query_map([ip], event_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every finding about `ip`, in any status: as its subject, or as a target ("ip" or "ip:port").
+    pub fn findings_for_ip(&self, ip: &str) -> Result<Vec<Finding>> {
+        let db = self.conn();
+        let mut st = db.prepare(&format!("SELECT {FINDING_COLS} FROM findings WHERE subject_ip = ?1 OR targets LIKE ?2"))?;
+        let like = format!("%{}%", ip.replace(['%', '_'], ""));
+        let mut rows: Vec<Finding> = st.query_map(params![ip, like], finding_from_row)?.collect::<rusqlite::Result<_>>()?;
+        // LIKE is only a first cut (10.0.0.1 is inside 10.0.0.12): keep exact matches.
+        rows.retain(|f| f.subject_ip == ip || f.targets.iter().any(|t| target_is(t, ip)));
+        rows.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        Ok(rows)
+    }
+
     /// Record a device sighting; returns true if this MAC was never seen before.
     pub fn upsert_device(&self, d: &crate::health::Device) -> Result<bool> {
         let db = self.conn();
@@ -578,5 +598,20 @@ impl Store {
             "DELETE FROM events WHERE ts < (SELECT ts FROM events ORDER BY ts DESC LIMIT 1 OFFSET ?1)",
             [max.max(1) as i64 - 1],
         )?)
+    }
+}
+
+/// Whether a finding target ("10.0.0.5", "10.0.0.5:443", "[2001:db8::1]:443") is the address `ip`.
+fn target_is(target: &str, ip: &str) -> bool {
+    let t = target.trim();
+    if t == ip {
+        return true;
+    }
+    if let Some(rest) = t.strip_prefix('[') {
+        return rest.split(']').next() == Some(ip);
+    }
+    match t.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.chars().all(|c| c.is_ascii_digit()) => host == ip,
+        _ => false,
     }
 }

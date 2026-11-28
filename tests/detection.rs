@@ -434,3 +434,38 @@ fn several_findings_change_status_together() {
     assert_eq!(store.set_status_many(&keys, "open").unwrap(), 2);
     assert_eq!(status("multi:a"), "open");
 }
+
+#[test]
+fn host_report_gathers_what_is_known_about_one_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("h.db")).unwrap();
+    let cfg = Config::default();
+    let raws = [
+        eve("203.0.113.7", "192.168.1.10", 22, "ET SCAN SSH", 11, 2, "Misc", "allowed", 0),
+        eve("203.0.113.7", "192.168.1.10", 22, "ET SCAN SSH", 11, 2, "Misc", "blocked", 1),
+        eve("203.0.113.7", "192.168.1.100", 443, "ET EXPLOIT x", 12, 1, "Misc", "blocked", 2),
+        // A neighbour whose address starts the same must not be counted.
+        eve("203.0.113.70", "192.168.1.10", 22, "ET SCAN SSH", 11, 2, "Misc", "allowed", 3),
+    ];
+    let evs: Vec<Event> = raws.iter().filter_map(normalize).collect();
+    store.add_events(&evs, "test").unwrap();
+    for f in detect::analyze(&evs, &cfg.detect, &cfg.detect.nets().unwrap(), None) {
+        store.upsert_finding(&f).unwrap();
+    }
+
+    let h = ipswatch::host::build(&store, &cfg, None, None, "203.0.113.7");
+    assert!(!h.internal);
+    assert!(!h.public, "203.0.113.0/24 is a documentation range");
+    assert_eq!((h.event_total, h.as_source, h.as_destination, h.not_dropped), (3, 3, 0, 1));
+    assert_eq!(h.top_signatures[0], (Some(11), "ET SCAN SSH".to_string(), 2));
+    assert!(h.findings.iter().all(|f| f.subject_ip == "203.0.113.7"));
+    assert!(!h.findings.is_empty());
+
+    // The target side: 192.168.1.10 is a target of both sources' findings, 192.168.1.1 of none.
+    let t = ipswatch::host::build(&store, &cfg, None, None, "192.168.1.10");
+    assert!(t.internal);
+    assert_eq!(t.as_destination, 3);
+    assert!(t.findings.iter().any(|f| f.subject_ip == "203.0.113.7"));
+    assert!(ipswatch::host::build(&store, &cfg, None, None, "192.168.1.1").findings.is_empty());
+    assert!(t.text().starts_with("Host 192.168.1.10  (Internal"));
+}

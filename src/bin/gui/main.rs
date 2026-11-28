@@ -4,6 +4,7 @@
 mod app;
 mod dns_view;
 mod health_view;
+mod host_view;
 mod settings;
 mod tray;
 mod troubleshoot_view;
@@ -142,8 +143,14 @@ fn main() -> eframe::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(config::default_config_path);
 
-    // One instance only: a second launch brings the running one to the front.
-    if !win::claim_single_instance() {
+    // One instance per settings file: a second launch brings the running one to the front.
+    let instance_key = if cfg_path == config::default_config_path() {
+        String::new()
+    } else {
+        let full = std::fs::canonicalize(&cfg_path).unwrap_or_else(|_| cfg_path.clone());
+        sha1_smol::Sha1::from(full.to_string_lossy().to_lowercase()).digest().to_string()[..12].to_string()
+    };
+    if !win::claim_single_instance(&instance_key) {
         win::show(win::find_window(WINDOW_TITLE));
         return Ok(());
     }
