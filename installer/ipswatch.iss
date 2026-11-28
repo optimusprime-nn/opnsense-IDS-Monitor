@@ -39,6 +39,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Source: "..\target\release\IPSWatch.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\ipswatch-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\IPS Watch"; Filename: "{app}\IPSWatch.exe"
