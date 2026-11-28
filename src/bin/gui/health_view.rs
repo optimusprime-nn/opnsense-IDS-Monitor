@@ -12,6 +12,8 @@ pub enum Action {
     None,
     CheckNow,
     OpenFinding(String),
+    /// Open the host page for this address.
+    OpenHost(String),
 }
 
 fn good(dark: bool) -> Color32 {
@@ -253,9 +255,15 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
                     b.rows(22.0, s.devices.len(), |mut r| {
                         let d = &s.devices[r.index()];
                         let random = ipswatch::health::is_random_mac(&d.mac);
+                        r.col(|ui| {
+                            ui.label(ipswatch::local_time(&d.first_seen));
+                        });
+                        r.col(|ui| {
+                            if ui.link(&d.ip).on_hover_text("Host page").clicked() {
+                                action = Action::OpenHost(d.ip.clone());
+                            }
+                        });
                         for t in [
-                            ipswatch::local_time(&d.first_seen),
-                            d.ip.clone(),
                             d.hostname.clone(),
                             if d.vendor.is_empty() && random { "(randomised MAC)".into() } else { d.vendor.clone() },
                             d.mac.clone(),

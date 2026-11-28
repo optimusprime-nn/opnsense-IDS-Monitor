@@ -23,7 +23,9 @@ fn tile(ui: &mut Ui, big: RichText, small: &str) {
     });
 }
 
-fn table(ui: &mut Ui, id: &str, headers: &[&str], widths: &[f32], rows: Vec<Vec<String>>) {
+/// A table; a first column holding an IP address is a link to its host page (returned when clicked).
+fn table(ui: &mut Ui, id: &str, headers: &[&str], widths: &[f32], rows: Vec<Vec<String>>) -> Option<String> {
+    let mut clicked = None;
     let mut t = TableBuilder::new(ui).id_salt(id).striped(true).max_scroll_height(260.0).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
     for w in widths {
         t = t.column(Column::initial(*w));
@@ -38,13 +40,20 @@ fn table(ui: &mut Ui, id: &str, headers: &[&str], widths: &[f32], rows: Vec<Vec<
         })
         .body(|b| {
             b.rows(22.0, rows.len(), |mut r| {
-                for c in &rows[r.index()] {
+                for (i, c) in rows[r.index()].iter().enumerate() {
                     r.col(|ui| {
-                        ui.label(c);
+                        if i == 0 && c.parse::<std::net::IpAddr>().is_ok() {
+                            if ui.link(c).on_hover_text("Host page").clicked() {
+                                clicked = Some(c.clone());
+                            }
+                        } else {
+                            ui.label(c);
+                        }
                     });
                 }
             });
         });
+    clicked
 }
 
 pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bool, configured: bool) -> Action {
@@ -97,7 +106,7 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
             });
             let mut info = vec![];
             if !srv.version.is_empty() {
-                info.push(format!("Technitium {}", srv.version));
+                info.push(format!("{} {}", srv.product(), srv.version));
             } else if srv.backend == "unbound" {
                 info.push("OPNsense Unbound".into());
             }
@@ -151,13 +160,13 @@ pub fn show(ui: &mut Ui, snap: Option<&Snapshot>, problems: &[Finding], busy: bo
         ui.add_space(8.0);
 
         for srv in &s.servers {
-            server_details(ui, srv, dark);
+            server_details(ui, srv, dark, &mut action);
         }
     });
     action
 }
 
-fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
+fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool, action: &mut Action) {
     let id = |x: &str| format!("dns_{}_{x}", srv.host);
     egui::CollapsingHeader::new(RichText::new(format!("{} ({})", srv.name, srv.host)).heading()).id_salt(id("h")).default_open(true).show(ui, |ui| {
         // Test lookups
@@ -215,7 +224,9 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
                 .iter()
                 .map(|c| vec![c.ip.clone(), c.name.clone(), c.hits.to_string(), c.usual.map(|u| format!("{u:.0}")).unwrap_or_else(|| "learning".into())])
                 .collect();
-            table(&mut cols[0], &id("cl"), &["Client", "Name", "Queries", "Usual/h"], &[120.0, 170.0, 70.0], rows);
+            if let Some(ip) = table(&mut cols[0], &id("cl"), &["Client", "Name", "Queries", "Usual/h"], &[120.0, 170.0, 70.0], rows) {
+                *action = Action::OpenHost(ip);
+            }
             cols[1].strong(format!("Top blocked domains ({})", if srv.top_window.is_empty() { "last hour" } else { &srv.top_window }));
             let rows = srv.top_blocked.iter().map(|(d, n)| vec![d.clone(), n.to_string()]).collect();
             table(&mut cols[1], &id("bl"), &["Domain", "Hits"], &[300.0], rows);
@@ -225,7 +236,9 @@ fn server_details(ui: &mut Ui, srv: &ServerStatus, dark: bool) {
             ui.add_space(4.0);
             ui.strong(format!("NXDOMAIN by client since the last check (from {})", srv.query_logger));
             let rows = srv.nx_clients.iter().map(|c| vec![c.ip.clone(), c.count.to_string(), c.unique.to_string(), c.sample.join(", ")]).collect();
-            table(ui, &id("nx"), &["Client", "Failed", "Distinct", "Examples"], &[120.0, 70.0, 70.0], rows);
+            if let Some(ip) = table(ui, &id("nx"), &["Client", "Failed", "Distinct", "Examples"], &[120.0, 70.0, 70.0], rows) {
+                *action = Action::OpenHost(ip);
+            }
         } else if srv.api_ok && srv.backend == "unbound" {
             ui.weak("NXDOMAIN bursts per client need Unbound statistics (Reporting > Unbound DNS).");
         } else if srv.api_ok {

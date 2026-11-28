@@ -56,9 +56,31 @@ impl Log for Buf {
     fn flush(&self) {}
 }
 
-/// Install the logger. `file`: optional log file; `stderr`: also print (CLI).
+/// Lines of the existing log file shown again after a restart.
+const RELOAD: usize = 500;
+
+/// The newest lines of an existing log file, with their level read back from the text.
+fn tail(path: &std::path::Path) -> VecDeque<Line> {
+    let Ok(text) = std::fs::read_to_string(path) else { return VecDeque::new() };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(RELOAD)..]
+        .iter()
+        .map(|l| {
+            let level = match l.get(21..26).map(str::trim) {
+                Some("ERROR") => Level::Error,
+                Some("WARN") => Level::Warn,
+                _ => Level::Info,
+            };
+            Line { level, text: crate::clean_text(l) }
+        })
+        .collect()
+}
+
+/// Install the logger. `file`: optional log file, whose newest lines are shown again;
+/// `stderr`: also print (CLI).
 pub fn init(file: Option<PathBuf>, stderr: bool) {
-    let buf = BUF.get_or_init(|| Buf { lines: Mutex::new(VecDeque::new()), file, stderr });
+    let earlier = file.as_deref().map(tail).unwrap_or_default();
+    let buf = BUF.get_or_init(|| Buf { lines: Mutex::new(earlier), file, stderr });
     let _ = log::set_logger(buf);
     log::set_max_level(LevelFilter::Info);
 }
@@ -77,5 +99,21 @@ pub fn len() -> usize {
 pub fn clear() {
     if let Some(b) = BUF.get() {
         b.lines.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn earlier_lines_come_back_with_their_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ipswatch.log");
+        std::fs::write(&p, "2026-11-27 10:00:00  INFO  started\n\n2026-11-27 10:00:01  WARN  FINDING x\n2026-11-27 10:00:02  ERROR poll failed\n").unwrap();
+        let t = tail(&p);
+        assert_eq!(t.iter().map(|l| l.level).collect::<Vec<_>>(), [Level::Info, Level::Warn, Level::Error]);
+        assert!(t[2].text.ends_with("poll failed"));
+        assert!(tail(&dir.path().join("missing.log")).is_empty());
     }
 }

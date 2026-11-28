@@ -20,7 +20,17 @@ nav_order: 7
   bounded, and syslog-only alerts never trigger auto-block.
 - **Blocking has guard rails.** Internal, private and reserved addresses and the never-block list are never blocked;
   auto-block only acts on sources the firewall API reported, and a block counts only once the firewall confirms it.
+- **Text from the network is cleaned.** Device names (DHCP, ARP), DNS client names, signatures and CrowdSec reasons are
+  chosen by whoever sends them. Before IPS Watch stores or shows them it turns control characters into spaces (a line
+  break could fake a row), removes invisible direction and formatting marks (which can make one name read as
+  another), and cuts them to 8,192 characters.
+- **Hardened executables.** Built with Control Flow Guard, and linked so the Windows DLLs they use load from System32
+  only, never from the folder they run in. Each release lists the SHA-256 of every file; the CI workflows run with
+  read-only access and their actions are pinned to exact commits.
 - **No telemetry.** IPS Watch talks only to your firewall, your DNS servers and the notification services you configure.
+  The one exception is **Who owns it?** on the host page: only when you click it, the one public address shown is sent
+  to `rdap.org` (which passes the question to the internet registry holding the address) and its name is asked of
+  your own DNS resolver. Private and reserved addresses are never sent.
 
 Found a security problem? Please open a private
 [security advisory](https://github.com/optimusprime-nn/opnsense-IDS-Monitor/security/advisories/new) on GitHub

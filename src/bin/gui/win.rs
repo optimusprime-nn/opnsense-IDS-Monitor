@@ -33,8 +33,10 @@ mod imp {
     }
 
     /// Returns false if another instance already holds the mutex.
-    pub fn claim_single_instance() -> bool {
-        let name = wide("Local\\IPSWatch.SingleInstance");
+    /// `key` is empty for the normal settings file; another `--config` gets its own lock, so a
+    /// second profile (or the demo data) can run beside the normal copy.
+    pub fn claim_single_instance(key: &str) -> bool {
+        let name = if key.is_empty() { wide("Local\\IPSWatch.SingleInstance") } else { wide(&format!("Local\\IPSWatch.SingleInstance.{key}")) };
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             // Leak the handle on purpose: it must live as long as the process.
@@ -90,7 +92,7 @@ pub fn find_window(_: &str) -> isize {
     0
 }
 #[cfg(not(windows))]
-pub fn claim_single_instance() -> bool {
+pub fn claim_single_instance(_key: &str) -> bool {
     true
 }
 #[cfg(not(windows))]
